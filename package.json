@@ -12,10 +12,13 @@
     "electron": "electron dist/electron/main.js",
     "electron:dev": "npx tsx src/electron/main.ts",
     "pack:mac": "npm run build && electron-builder --mac --x64 --dir",
-    "dist:mac": "npm run build && electron-builder --mac --x64 -c.mac.identity=null",
+    "dist:mac:intel": "npm run build && electron-builder --mac --x64 -c.mac.identity=null",
+    "dist:mac:arm": "npm run build && electron-builder --mac --arm64 -c.mac.identity=null",
+    "dist:mac": "npm run build && electron-builder --mac --x64 --arm64 -c.mac.identity=null",
     "pack:win": "npm run build && electron-builder --win --x64 --dir",
     "dist:win": "npm run build && electron-builder --win --x64",
-    "dist:all": "npm run build && electron-builder -mw --x64 -c.mac.identity=null",
+    "dist:linux": "npm run build && electron-builder --linux --x64",
+    "dist:all": "npm run build && electron-builder -mwl --x64 --arm64 -c.mac.identity=null",
     "demo": "npx tsx src/cli/demo.ts"
   },
   "keywords": [
@@ -55,13 +58,15 @@
         {
           "target": "dmg",
           "arch": [
-            "x64"
+            "x64",
+            "arm64"
           ]
         },
         {
           "target": "zip",
           "arch": [
-            "x64"
+            "x64",
+            "arm64"
           ]
         }
       ],
@@ -112,6 +117,30 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "SB SFTP Studio"
+    },
+    "linux": {
+      "category": "Network;Utility;Development;",
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "tar.gz",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "src/ui/public/assets/logo.png"
     }
   },
   "dependencies": {
