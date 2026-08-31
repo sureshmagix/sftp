@@ -5,12 +5,23 @@ import { FileItem, FileType } from '../types';
 
 export class LocalFsService {
   public getHomeDir(): string {
-    return os.homedir();
+    const home = os.homedir().replace(/\\/g, '/');
+    return home;
+  }
+
+  private normalizePath(p: string): string {
+    if (!p) return this.getHomeDir();
+    let norm = p.replace(/\\/g, '/');
+    if (/^[a-zA-Z]:$/.test(norm)) {
+      norm += '/';
+    }
+    return norm;
   }
 
   public async exists(targetPath: string): Promise<boolean> {
+    const cleanPath = this.normalizePath(targetPath);
     try {
-      await fs.promises.access(targetPath);
+      await fs.promises.access(cleanPath);
       return true;
     } catch {
       return false;
@@ -18,15 +29,16 @@ export class LocalFsService {
   }
 
   public async stat(targetPath: string): Promise<FileItem> {
-    const stats = await fs.promises.stat(targetPath);
-    const name = path.basename(targetPath);
+    const cleanPath = this.normalizePath(targetPath);
+    const stats = await fs.promises.stat(cleanPath);
+    const name = path.basename(cleanPath) || cleanPath;
     let type: FileType = 'file';
     if (stats.isDirectory()) type = 'directory';
     else if (stats.isSymbolicLink()) type = 'symlink';
 
     return {
       name,
-      path: targetPath,
+      path: cleanPath,
       size: stats.size,
       type,
       modifyTime: stats.mtime,
@@ -36,13 +48,15 @@ export class LocalFsService {
   }
 
   public async listDir(targetPath: string): Promise<FileItem[]> {
-    const cleanPath = targetPath || this.getHomeDir();
+    const cleanPath = this.normalizePath(targetPath);
     const entries = await fs.promises.readdir(cleanPath, { withFileTypes: true });
 
     const items: FileItem[] = [];
 
     for (const entry of entries) {
-      const fullPath = path.join(cleanPath, entry.name);
+      const fullPath = cleanPath.endsWith('/')
+        ? `${cleanPath}${entry.name}`
+        : `${cleanPath}/${entry.name}`;
       let type: FileType = 'file';
       let size = 0;
       let mtime = new Date();
@@ -77,14 +91,17 @@ export class LocalFsService {
   }
 
   public async mkdir(targetPath: string): Promise<void> {
-    await fs.promises.mkdir(targetPath, { recursive: true });
+    const cleanPath = this.normalizePath(targetPath);
+    await fs.promises.mkdir(cleanPath, { recursive: true });
   }
 
   public async deleteFile(targetPath: string): Promise<void> {
-    await fs.promises.unlink(targetPath);
+    const cleanPath = this.normalizePath(targetPath);
+    await fs.promises.unlink(cleanPath);
   }
 
   public async rmdir(targetPath: string, recursive: boolean = true): Promise<void> {
-    await fs.promises.rm(targetPath, { recursive, force: true });
+    const cleanPath = this.normalizePath(targetPath);
+    await fs.promises.rm(cleanPath, { recursive, force: true });
   }
 }

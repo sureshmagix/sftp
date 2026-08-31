@@ -99,6 +99,21 @@ export class SftpClientService {
   }
 
   /**
+   * Resolve real canonical absolute path for a remote directory
+   */
+  public async realpath(remotePath: string = '.'): Promise<string> {
+    const sftp = await this.getSftp();
+    return new Promise((resolve) => {
+      sftp.realpath(remotePath, (err, absPath) => {
+        if (err || !absPath) {
+          return resolve(remotePath === '.' ? '/' : remotePath);
+        }
+        resolve(absPath);
+      });
+    });
+  }
+
+  /**
    * Get stats for a remote path
    */
   public async stat(remotePath: string): Promise<FileItem> {

@@ -29,6 +29,57 @@ let currentTheme = localStorage.getItem('sftp_theme') || 'theme-midnight';
 let currentUiFontSize = localStorage.getItem('sftp_ui_font_size') || 'font-size-md';
 let currentTermFontSize = parseInt(localStorage.getItem('sftp_term_font_size') || '12', 10);
 
+// Cross-Platform Path Helpers (Windows & POSIX)
+function normalizePath(p) {
+  if (!p) return '';
+  let norm = p.toString().replace(/\\/g, '/').replace(/\/+/g, '/');
+  // Normalize Windows drive letter e.g. "C:" -> "C:/"
+  if (/^[a-zA-Z]:$/.test(norm)) {
+    norm += '/';
+  }
+  // Remove trailing slash unless it's root ("/" or "C:/")
+  if (norm.length > 1 && norm.endsWith('/') && !/^[a-zA-Z]:\/$/.test(norm)) {
+    norm = norm.slice(0, -1);
+  }
+  return norm;
+}
+
+function joinPath(base, child) {
+  const normBase = normalizePath(base);
+  if (!normBase || normBase === '.') return child;
+  if (normBase.endsWith('/')) return `${normBase}${child}`;
+  return `${normBase}/${child}`;
+}
+
+function getParentPath(p, isLocal = false) {
+  const norm = normalizePath(p);
+  if (!norm || norm === '/' || norm === '.') return isLocal ? '/' : '/';
+  
+  // Windows drive root check e.g. "C:/" or "C:"
+  if (/^[a-zA-Z]:\/?$/.test(norm)) {
+    return norm.endsWith('/') ? norm : norm + '/';
+  }
+
+  const lastSlash = norm.lastIndexOf('/');
+  if (lastSlash === -1) return isLocal ? '/' : '/';
+  
+  // If parent is drive root e.g. "C:/Users" -> lastSlash at 2 -> "C:/"
+  if (lastSlash === 2 && /^[a-zA-Z]:/.test(norm)) {
+    return norm.substring(0, 3);
+  }
+  
+  if (lastSlash === 0) return '/';
+  return norm.substring(0, lastSlash);
+}
+
+function getPathBaseName(p) {
+  const norm = normalizePath(p);
+  if (!norm) return '';
+  if (/^[a-zA-Z]:\/?$/.test(norm)) return norm;
+  const parts = norm.split('/').filter(Boolean);
+  return parts.pop() || norm;
+}
+
 // Detachable Terminal State
 let isTerminalDetached = false;
 let isTerminalMaximized = false;
@@ -729,7 +780,8 @@ async function silentSyncAll() {
   if (currentLocalPath) {
     try {
       const res = await fetch(`/api/list-local?path=${encodeURIComponent(currentLocalPath)}`);
-      const files = await res.json();
+      const data = await res.json();
+      const files = data.files || (Array.isArray(data) ? data : []);
       if (Array.isArray(files)) {
         localFilesCache = files;
         applyLocalFileFilter();
@@ -741,8 +793,9 @@ async function silentSyncAll() {
     try {
       const res = await fetch(`/api/list-remote?path=${encodeURIComponent(currentRemotePath)}`);
       const data = await res.json();
-      if (data && Array.isArray(data.files)) {
-        remoteFilesCache = data.files;
+      const files = data.files || (Array.isArray(data) ? data : []);
+      if (Array.isArray(files)) {
+        remoteFilesCache = files;
         applyRemoteFileFilter();
       }
     } catch (_) {}
@@ -780,85 +833,86 @@ function isItemRecent(file, fullPath) {
   return false;
 }
 
-// Universal Sort Function
-function applySortToFiles(files, state) {
-  return [...files].sort((a, b) => {
+function applySortToFiles(files, sortConfig) {
+  if (!files || files.length === 0) return [];
+  const { key, asc } = sortConfig;
+  const sorted = [...files];
+
+  sorted.sort((a, b) => {
+    // Directories always first
     if (a.type === 'directory' && b.type !== 'directory') return -1;
     if (a.type !== 'directory' && b.type === 'directory') return 1;
 
-    let valA = a[state.key];
-    let valB = b[state.key];
+    let valA = a[key];
+    let valB = b[key];
 
-    if (state.key === 'modifyTime') {
-      const timeA = new Date(valA || 0).getTime();
-      const timeB = new Date(valB || 0).getTime();
-      if (timeB !== timeA) {
-        return state.asc ? (timeA - timeB) : (timeB - timeA);
-      }
-      return a.name.localeCompare(b.name);
-    } else if (state.key === 'size') {
-      const sizeA = a.type === 'directory' ? -1 : (Number(valA) || 0);
-      const sizeB = b.type === 'directory' ? -1 : (Number(valB) || 0);
-      if (sizeA !== sizeB) {
-        return state.asc ? (sizeA - sizeB) : (sizeB - sizeA);
-      }
-      return a.name.localeCompare(b.name);
-    } else {
-      const strA = (valA || '').toString().toLowerCase();
-      const strB = (valB || '').toString().toLowerCase();
-      if (strA < strB) return state.asc ? -1 : 1;
-      if (strA > strB) return state.asc ? 1 : -1;
-      return 0;
+    if (key === 'modifyTime') {
+      valA = valA ? new Date(valA).getTime() : 0;
+      valB = valB ? new Date(valB).getTime() : 0;
+      return asc ? valA - valB : valB - valA;
     }
+
+    if (key === 'size') {
+      valA = valA || 0;
+      valB = valB || 0;
+      return asc ? valA - valB : valB - valA;
+    }
+
+    if (key === 'name') {
+      valA = (valA || '').toString().toLowerCase();
+      valB = (valB || '').toString().toLowerCase();
+      return asc ? valA.localeCompare(valB) : valB.localeCompare(valA);
+    }
+
+    return 0;
   });
+
+  return sorted;
 }
 
-function updateSortHeaderIndicators(type) {
-  const state = sortState[type];
-  const prefix = type === 'local' ? 'localHeader' : 'remoteHeader';
-  const cols = [
-    { name: 'Name', key: 'name' },
-    { name: 'Size', key: 'size' },
-    { name: 'Date', key: 'modifyTime' }
-  ];
-
-  cols.forEach(col => {
-    const th = document.getElementById(`${prefix}${col.name}`);
-    if (!th) return;
-
-    const isActive = state.key === col.key;
-    th.classList.toggle('active', isActive);
-
-    const icon = th.querySelector('.sort-indicator');
-    if (icon) {
-      if (!isActive) {
-        icon.className = 'fa-solid fa-sort sort-indicator';
-      } else if (col.key === 'name' || col.key === 'type') {
-        icon.className = state.asc
-          ? 'fa-solid fa-arrow-down-a-z sort-indicator'
-          : 'fa-solid fa-arrow-up-z-a sort-indicator';
-      } else {
-        icon.className = state.asc
-          ? 'fa-solid fa-arrow-up-wide-short sort-indicator'
-          : 'fa-solid fa-arrow-down-wide-short sort-indicator';
-      }
-    }
-  });
-}
-
-function sortFiles(type, key) {
-  const state = sortState[type];
-  if (state.key === key) {
-    state.asc = !state.asc;
+function handleSortClick(panelType, key) {
+  const current = sortState[panelType];
+  if (current.key === key) {
+    current.asc = !current.asc;
   } else {
-    state.key = key;
-    // Default to descending (newest first) for modified time, ascending for others
-    state.asc = key === 'modifyTime' ? false : true;
+    current.key = key;
+    current.asc = key === 'name';
   }
 
-  updateSortHeaderIndicators(type);
-  if (type === 'local') applyLocalFileFilter();
-  else applyRemoteFileFilter();
+  updateSortHeadersUI(panelType);
+
+  if (panelType === 'local') {
+    applyLocalFileFilter();
+  } else {
+    applyRemoteFileFilter();
+  }
+}
+
+function updateSortHeadersUI(panelType) {
+  const prefix = panelType === 'local' ? 'sortLocal' : 'sortRemote';
+  const current = sortState[panelType];
+  const keys = ['Name', 'Size', 'Date'];
+
+  keys.forEach(k => {
+    const headerEl = document.getElementById(`${prefix}${k}`);
+    if (!headerEl) return;
+    const iconEl = headerEl.querySelector('.sort-icon');
+    const lowerKey = k === 'Date' ? 'modifyTime' : k.toLowerCase();
+
+    if (current.key === lowerKey) {
+      headerEl.classList.add('sort-active');
+      if (iconEl) {
+        iconEl.className = current.asc
+          ? 'fa-solid fa-arrow-up-short-wide sort-icon'
+          : 'fa-solid fa-arrow-down-wide-short sort-icon';
+      }
+    } else {
+      headerEl.classList.remove('sort-active');
+      if (iconEl) {
+        iconEl.className = 'fa-solid fa-sort sort-icon';
+      }
+    }
+  });
 }
 
 function applyLocalFileFilter() {
@@ -872,7 +926,7 @@ function applyLocalFileFilter() {
 
   if (isLocalRecentFilterActive) {
     filtered = filtered.filter(f => {
-      const fullPath = `${currentLocalPath}/${f.name}`.replace(/\/+/g, '/');
+      const fullPath = joinPath(currentLocalPath, f.name);
       return isItemRecent(f, fullPath);
     });
   }
@@ -892,7 +946,7 @@ function applyRemoteFileFilter() {
 
   if (isRemoteRecentFilterActive) {
     filtered = filtered.filter(f => {
-      const fullPath = currentRemotePath === '.' ? f.name : `${currentRemotePath}/${f.name}`.replace(/\/+/g, '/');
+      const fullPath = joinPath(currentRemotePath, f.name);
       return isItemRecent(f, fullPath);
     });
   }
@@ -1098,6 +1152,9 @@ async function handleConnect(event) {
 
     const result = await res.json();
     if (result.success) {
+      if (result.remoteHome) {
+        currentRemotePath = normalizePath(result.remoteHome);
+      }
       appendTerminalMsg('info', `✅ SSH Connection established with ${username}@${host}:${port}`);
       showToast('success', `Connected to ${username}@${host}`);
       updateConnectionUI('connected');
@@ -1147,7 +1204,7 @@ async function fetchInitialLocalDir() {
   try {
     const res = await fetch('/api/local-home');
     const data = await res.json();
-    currentLocalPath = data.path;
+    currentLocalPath = normalizePath(data.path);
     fetchLocalFiles(currentLocalPath);
   } catch (err) {
     console.error('Failed to get local home:', err);
@@ -1156,10 +1213,16 @@ async function fetchInitialLocalDir() {
 
 async function fetchLocalFiles(path) {
   try {
-    renderBreadcrumbs('local', path);
-    const res = await fetch(`/api/list-local?path=${encodeURIComponent(path)}`);
-    const files = await res.json();
-    localFilesCache = files || [];
+    const target = normalizePath(path || currentLocalPath);
+    renderBreadcrumbs('local', target);
+    const res = await fetch(`/api/list-local?path=${encodeURIComponent(target)}`);
+    const data = await res.json();
+    if (data.error) {
+      showToast('error', `Failed to load local files: ${data.error}`);
+      return;
+    }
+    currentLocalPath = normalizePath(data.currentPath || target);
+    localFilesCache = data.files || (Array.isArray(data) ? data : []);
     applyLocalFileFilter();
   } catch (err) {
     showToast('error', `Failed to load local files: ${err.message}`);
@@ -1167,10 +1230,18 @@ async function fetchLocalFiles(path) {
 }
 
 function isItemTransferring(filePath) {
-  return activeTransfersCache.some(t => 
-    (t.status === 'transferring' || t.status === 'queued') && 
-    (t.localPath === filePath || t.localPath.startsWith(filePath + '/') || t.remotePath === filePath || t.remotePath.startsWith(filePath + '/'))
-  );
+  const normTarget = normalizePath(filePath);
+  return activeTransfersCache.some(t => {
+    if (t.status !== 'transferring' && t.status !== 'queued') return false;
+    const lNorm = normalizePath(t.localPath);
+    const rNorm = normalizePath(t.remotePath);
+    return (
+      lNorm === normTarget ||
+      lNorm.startsWith(normTarget + '/') ||
+      rNorm === normTarget ||
+      rNorm.startsWith(normTarget + '/')
+    );
+  });
 }
 
 function renderLocalFiles(files) {
@@ -1185,7 +1256,7 @@ function renderLocalFiles(files) {
     const iconClass = getFileIconClass(file.name, isDir);
     const sizeStr = isDir ? '--' : formatBytes(file.size);
     const dateStr = formatFileDate(file.modifyTime);
-    const fullPath = `${currentLocalPath}/${file.name}`.replace(/\/+/g, '/');
+    const fullPath = joinPath(currentLocalPath, file.name);
     const transferring = isItemTransferring(fullPath);
     const recent = isItemRecent(file, fullPath);
 
@@ -1234,12 +1305,13 @@ function filterLocalFiles(query) {
 }
 
 function navigateLocalPath(path) {
-  currentLocalPath = path;
-  fetchLocalFiles(path);
+  const norm = normalizePath(path);
+  currentLocalPath = norm;
+  fetchLocalFiles(norm);
 }
 
 function navigateLocalUp() {
-  const parent = currentLocalPath.substring(0, currentLocalPath.lastIndexOf('/')) || '/';
+  const parent = getParentPath(currentLocalPath, true);
   navigateLocalPath(parent);
 }
 
@@ -1250,12 +1322,12 @@ function refreshLocal() {
 async function promptCreateLocalDir() {
   const dirName = prompt('Enter new local directory name:');
   if (!dirName) return;
-  const newPath = `${currentLocalPath}/${dirName}`.replace(/\/+/g, '/');
+  const newPath = joinPath(currentLocalPath, dirName.trim());
   try {
     const res = await fetch('/api/mkdir-local', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ localPath: newPath }),
+      body: JSON.stringify({ localPath: normalizePath(newPath) }),
     });
     const data = await res.json();
     if (data.success) {
@@ -1271,13 +1343,13 @@ async function promptCreateLocalDir() {
 
 async function deleteLocalItem(localPath, isDirectory) {
   const itemType = isDirectory ? 'folder' : 'file';
-  const name = localPath.split('/').filter(Boolean).pop() || localPath;
+  const name = getPathBaseName(localPath);
   if (!confirm(`Are you sure you want to permanently delete local ${itemType} "${name}"?`)) return;
   try {
     const res = await fetch('/api/delete-local', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ localPath, isDirectory }),
+      body: JSON.stringify({ localPath: normalizePath(localPath), isDirectory }),
     });
     const data = await res.json();
     if (data.success) {
@@ -1297,18 +1369,19 @@ async function deleteLocalItem(localPath, isDirectory) {
 async function fetchRemoteFiles(path) {
   if (!isConnected) return;
   try {
-    renderBreadcrumbs('remote', path);
+    const target = normalizePath(path || currentRemotePath);
+    renderBreadcrumbs('remote', target);
     const dropLabel = document.getElementById('dropzonePathLabel');
-    if (dropLabel) dropLabel.innerText = path;
+    if (dropLabel) dropLabel.innerText = target;
 
-    const res = await fetch(`/api/list-remote?path=${encodeURIComponent(path)}`);
+    const res = await fetch(`/api/list-remote?path=${encodeURIComponent(target)}`);
     const data = await res.json();
     if (data.error) {
       showToast('error', `Remote error: ${data.error}`);
       return;
     }
-    currentRemotePath = path;
-    remoteFilesCache = data.files || [];
+    currentRemotePath = normalizePath(data.currentPath || target);
+    remoteFilesCache = data.files || (Array.isArray(data) ? data : []);
     applyRemoteFileFilter();
   } catch (err) {
     showToast('error', `Failed to list remote directory: ${err.message}`);
@@ -1327,8 +1400,8 @@ function renderRemoteFiles(files) {
     const iconClass = getFileIconClass(file.name, isDir);
     const sizeStr = isDir ? '--' : formatBytes(file.size);
     const dateStr = formatFileDate(file.modifyTime);
-    const targetRemotePath = currentRemotePath === '.' ? file.name : `${currentRemotePath}/${file.name}`.replace(/\/+/g, '/');
-    const targetLocalPath = `${currentLocalPath}/${file.name}`.replace(/\/+/g, '/');
+    const targetRemotePath = joinPath(currentRemotePath, file.name);
+    const targetLocalPath = joinPath(currentLocalPath, file.name);
     const transferring = isItemTransferring(targetRemotePath);
     const recent = isItemRecent(file, targetRemotePath);
 
@@ -1376,11 +1449,13 @@ function filterRemoteFiles(query) {
 }
 
 function navigateRemotePath(path) {
-  fetchRemoteFiles(path);
+  const norm = normalizePath(path);
+  currentRemotePath = norm;
+  fetchRemoteFiles(norm);
 }
 
 function navigateRemoteUp() {
-  const parent = currentRemotePath.substring(0, currentRemotePath.lastIndexOf('/')) || '.';
+  const parent = getParentPath(currentRemotePath, false);
   navigateRemotePath(parent);
 }
 
@@ -1391,12 +1466,12 @@ function refreshRemote() {
 async function promptCreateRemoteDir() {
   const dirName = prompt('Enter new remote directory name:');
   if (!dirName) return;
-  const newPath = currentRemotePath === '.' ? dirName : `${currentRemotePath}/${dirName}`;
+  const newPath = joinPath(currentRemotePath, dirName.trim());
   try {
     const res = await fetch('/api/mkdir-remote', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ remotePath: newPath }),
+      body: JSON.stringify({ remotePath: normalizePath(newPath) }),
     });
     const data = await res.json();
     if (data.success) {
@@ -1412,13 +1487,13 @@ async function promptCreateRemoteDir() {
 
 async function deleteRemoteItem(remotePath, isDirectory) {
   const itemType = isDirectory ? 'folder' : 'file';
-  const name = remotePath === '.' ? 'current directory' : (remotePath.split('/').filter(Boolean).pop() || remotePath);
+  const name = getPathBaseName(remotePath);
   if (!confirm(`Are you sure you want to permanently delete remote ${itemType} "${name}"?`)) return;
   try {
     const res = await fetch('/api/delete-remote', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ remotePath, isDirectory }),
+      body: JSON.stringify({ remotePath: normalizePath(remotePath), isDirectory }),
     });
     const data = await res.json();
     if (data.success) {
@@ -1786,35 +1861,61 @@ function renderBreadcrumbs(type, fullPath) {
   const container = document.getElementById(`${type}Breadcrumb`);
   if (!container) return;
 
-  const normalized = fullPath.replace(/\/+/g, '/');
-  const parts = normalized.split('/').filter(Boolean);
+  const norm = normalizePath(fullPath);
+  const isWindowsDrive = /^[a-zA-Z]:/.test(norm);
+  const navFn = type === 'local' ? 'navigateLocalPath' : 'navigateRemotePath';
 
-  let accumulated = '';
-  let html = `<span class="breadcrumb-item ${parts.length === 0 ? 'active' : ''}" onclick="navigate${type === 'local' ? 'Local' : 'Remote'}Path('/')">/</span>`;
+  if (isWindowsDrive && type === 'local') {
+    const driveMatch = norm.match(/^([a-zA-Z]:)/);
+    const drive = driveMatch ? driveMatch[1] + '/' : 'C:/';
+    const subPath = norm.substring(driveMatch ? driveMatch[1].length : 2);
+    const parts = subPath.split('/').filter(Boolean);
 
-  parts.forEach((part, idx) => {
-    accumulated += '/' + part;
-    const isLast = idx === parts.length - 1;
-    const pathTarget = accumulated;
-    html += `
-      <span class="breadcrumb-sep">/</span>
-      <span class="breadcrumb-item ${isLast ? 'active' : ''}" onclick="navigate${type === 'local' ? 'Local' : 'Remote'}Path('${escapeHtml(pathTarget)}')">${escapeHtml(part)}</span>
-    `;
-  });
+    let html = `<span class="breadcrumb-item ${parts.length === 0 ? 'active' : ''}" onclick="${navFn}('${escapeHtml(drive)}')">${escapeHtml(drive)}</span>`;
+    let accumulated = drive.slice(0, -1);
 
-  container.innerHTML = html;
+    parts.forEach((part, idx) => {
+      accumulated += '/' + part;
+      const isLast = idx === parts.length - 1;
+      const target = accumulated;
+      html += `
+        <span class="breadcrumb-sep">/</span>
+        <span class="breadcrumb-item ${isLast ? 'active' : ''}" onclick="${navFn}('${escapeHtml(target)}')">${escapeHtml(part)}</span>
+      `;
+    });
+    container.innerHTML = html;
+  } else {
+    const parts = norm.split('/').filter(Boolean);
+    let html = `<span class="breadcrumb-item ${parts.length === 0 ? 'active' : ''}" onclick="${navFn}('/')">/</span>`;
+    let accumulated = '';
+
+    parts.forEach((part, idx) => {
+      accumulated += '/' + part;
+      const isLast = idx === parts.length - 1;
+      const target = accumulated;
+      html += `
+        <span class="breadcrumb-sep">/</span>
+        <span class="breadcrumb-item ${isLast ? 'active' : ''}" onclick="${navFn}('${escapeHtml(target)}')">${escapeHtml(part)}</span>
+      `;
+    });
+    container.innerHTML = html;
+  }
 }
 
 // -------------------------------------------------------------
 // 11. Transfer Queue Engine & Local Directory Upload
 // -------------------------------------------------------------
 async function queueUpload(localPath, fileName) {
-  const remotePath = currentRemotePath === '.' ? fileName : `${currentRemotePath}/${fileName}`;
+  const remotePath = joinPath(currentRemotePath, fileName);
   try {
     await fetch('/api/enqueue-file', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ localPath, remotePath, direction: 'upload' }),
+      body: JSON.stringify({
+        localPath: normalizePath(localPath),
+        remotePath: normalizePath(remotePath),
+        direction: 'upload'
+      }),
     });
     showToast('info', `Queued upload: ${fileName}`);
     switchDockTab('transfers');
@@ -1834,7 +1935,10 @@ async function queueUploadFolder(localDir, dirName) {
     const res = await fetch('/api/enqueue-dir-upload', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ localDir, remoteDir: currentRemotePath }),
+      body: JSON.stringify({
+        localDir: normalizePath(localDir),
+        remoteDir: normalizePath(currentRemotePath)
+      }),
     });
     const data = await res.json();
     if (data.success) {
@@ -1852,7 +1956,7 @@ async function queueUploadFolder(localDir, dirName) {
 
 async function uploadCurrentLocalFolder() {
   if (!currentLocalPath) return;
-  const dirName = currentLocalPath.split('/').filter(Boolean).pop() || 'current_dir';
+  const dirName = getPathBaseName(currentLocalPath) || 'current_dir';
   queueUploadFolder(currentLocalPath, dirName);
 }
 
@@ -1861,7 +1965,11 @@ async function queueDownload(remotePath, localPath) {
     await fetch('/api/enqueue-file', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ localPath, remotePath, direction: 'download' }),
+      body: JSON.stringify({
+        localPath: normalizePath(localPath),
+        remotePath: normalizePath(remotePath),
+        direction: 'download'
+      }),
     });
     showToast('info', `Queued download: ${remotePath}`);
     switchDockTab('transfers');
@@ -1877,7 +1985,10 @@ async function queueDownloadFolder(remoteDir, dirName) {
     const res = await fetch('/api/enqueue-dir-download', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ remoteDir, localDir: currentLocalPath }),
+      body: JSON.stringify({
+        remoteDir: normalizePath(remoteDir),
+        localDir: normalizePath(currentLocalPath)
+      }),
     });
     const data = await res.json();
     if (data.success) {

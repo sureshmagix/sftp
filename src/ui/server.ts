@@ -171,7 +171,11 @@ export class SftpWebServer {
         };
 
         await this.controller.sshConnection.connect(config);
-        res.json({ success: true, status: this.controller.sshConnection.getStatus() });
+        let remoteHome = '/';
+        try {
+          remoteHome = await this.controller.sftpService.realpath('.');
+        } catch (_) {}
+        res.json({ success: true, status: this.controller.sshConnection.getStatus(), remoteHome });
       } catch (err: any) {
         let rawError = (err.message || '').toString();
         let formattedError = rawError || 'Connection failed';
@@ -212,15 +216,20 @@ export class SftpWebServer {
 
     // Local FS: Home directory
     this.app.get('/api/local-home', (_req: Request, res: Response) => {
-      res.json({ path: this.controller.localFsService.getHomeDir() });
+      const home = this.controller.localFsService.getHomeDir();
+      res.json({ path: home });
     });
 
     // Local FS: List directory
     this.app.get('/api/list-local', async (req: Request, res: Response) => {
-      const targetPath = (req.query.path as string) || this.controller.localFsService.getHomeDir();
+      let targetPath = (req.query.path as string) || this.controller.localFsService.getHomeDir();
+      targetPath = targetPath.replace(/\\/g, '/');
+      if (/^[a-zA-Z]:$/.test(targetPath)) {
+        targetPath += '/';
+      }
       try {
         const files = await this.controller.localFsService.listDir(targetPath);
-        res.json(files);
+        res.json({ files, currentPath: targetPath });
       } catch (err: any) {
         res.status(500).json({ error: err.message });
       }
@@ -228,10 +237,11 @@ export class SftpWebServer {
 
     // Local FS: Read/Preview File Content
     this.app.get('/api/read-file-local', async (req: Request, res: Response) => {
-      const filePath = req.query.path as string;
+      let filePath = req.query.path as string;
       if (!filePath) {
         return res.status(400).json({ error: 'Path parameter is required' });
       }
+      filePath = filePath.replace(/\\/g, '/');
       try {
         const stat = await fs.promises.stat(filePath);
         const name = path.basename(filePath);
@@ -264,7 +274,8 @@ export class SftpWebServer {
 
     // Local FS: Create directory
     this.app.post('/api/mkdir-local', async (req: Request, res: Response) => {
-      const { localPath } = req.body;
+      let { localPath } = req.body;
+      if (localPath) localPath = localPath.replace(/\\/g, '/');
       try {
         await this.controller.localFsService.mkdir(localPath);
         res.json({ success: true });
@@ -275,7 +286,8 @@ export class SftpWebServer {
 
     // Local FS: Delete file or directory
     this.app.post('/api/delete-local', async (req: Request, res: Response) => {
-      const { localPath, isDirectory } = req.body;
+      let { localPath, isDirectory } = req.body;
+      if (localPath) localPath = localPath.replace(/\\/g, '/');
       try {
         if (isDirectory) {
           await this.controller.localFsService.rmdir(localPath, true);
@@ -290,10 +302,17 @@ export class SftpWebServer {
 
     // Remote SFTP: List directory
     this.app.get('/api/list-remote', async (req: Request, res: Response) => {
-      const targetPath = (req.query.path as string) || '.';
+      let targetPath = (req.query.path as string) || '.';
       try {
+        if (targetPath === '.' || !targetPath) {
+          try {
+            targetPath = await this.controller.sftpService.realpath('.');
+          } catch (_) {
+            targetPath = '/';
+          }
+        }
         const files = await this.controller.sftpService.listDir(targetPath);
-        res.json({ files });
+        res.json({ files, currentPath: targetPath });
       } catch (err: any) {
         res.status(500).json({ error: err.message });
       }

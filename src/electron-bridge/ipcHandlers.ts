@@ -39,7 +39,11 @@ export class SftpAppController {
     // Connection APIs
     ipcMain.handle('sftp:connect', async (_event: any, config: SshConnectConfig) => {
       await this.sshConnection.connect(config);
-      return { success: true, status: this.sshConnection.getStatus() };
+      let remoteHome = '/';
+      try {
+        remoteHome = await this.sftpService.realpath('.');
+      } catch (_) {}
+      return { success: true, status: this.sshConnection.getStatus(), remoteHome };
     });
 
     ipcMain.handle('sftp:disconnect', async () => {
