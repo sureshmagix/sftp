@@ -1,0 +1,133 @@
+{
+  "name": "sb-sftp-studio",
+  "productName": "SB SFTP Studio",
+  "description": "Multi-Client SSH & SFTP Desktop Studio for Remote Servers",
+  "version": "1.0.0",
+  "main": "dist/electron/main.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "start": "npx tsx src/ui/server.ts",
+    "copy:public": "node -e \"const fs=require('fs'); fs.mkdirSync('dist/ui', {recursive:true}); fs.cpSync('src/ui/public', 'dist/ui/public', {recursive:true});\"",
+    "build": "tsc && npm run copy:public",
+    "electron": "electron dist/electron/main.js",
+    "electron:dev": "npx tsx src/electron/main.ts",
+    "pack:mac": "npm run build && electron-builder --mac --x64 --dir",
+    "dist:mac": "npm run build && electron-builder --mac --x64 -c.mac.identity=null",
+    "pack:win": "npm run build && electron-builder --win --x64 --dir",
+    "dist:win": "npm run build && electron-builder --win --x64",
+    "dist:all": "npm run build && electron-builder -mw --x64 -c.mac.identity=null",
+    "demo": "npx tsx src/cli/demo.ts"
+  },
+  "keywords": [
+    "sftp",
+    "ssh",
+    "remote-server",
+    "file-transfer",
+    "terminal",
+    "electron",
+    "gui"
+  ],
+  "author": "SB SFTP",
+  "license": "MIT",
+  "build": {
+    "appId": "com.sbsftp.studio",
+    "productName": "SB SFTP Studio",
+    "copyright": "Copyright © 2026 SB SFTP",
+    "electronVersion": "29.4.0",
+    "npmRebuild": false,
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "src/ui/public",
+        "to": "public"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "src/ui/public/assets/logo.png",
+      "identity": null,
+      "hardenedRuntime": false
+    },
+    "dmg": {
+      "contents": [
+        {
+          "x": 130,
+          "y": 220
+        },
+        {
+          "x": 410,
+          "y": 220,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "src/ui/public/assets/logo.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "SB SFTP Studio"
+    }
+  },
+  "dependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.2.0",
+    "@types/ssh2": "^1.15.5",
+    "@types/ws": "^8.18.1",
+    "dotenv": "^17.4.2",
+    "express": "^4.22.2",
+    "ssh2": "^1.17.0",
+    "tsx": "^4.23.12",
+    "typescript": "^7.0.2",
+    "ws": "^8.21.3"
+  },
+  "devDependencies": {
+    "electron": "^29.4.0",
+    "electron-builder": "^26.15.3"
+  }
+}

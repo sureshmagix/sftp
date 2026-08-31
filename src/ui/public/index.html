@@ -1,0 +1,750 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SB SFTP Studio - Multi-Client SSH & SFTP Manager</title>
+  <link rel="icon" type="image/png" href="assets/logo.png">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app-wrapper">
+    <!-- Top Global Header -->
+    <header class="app-header">
+      <div class="header-left">
+        <div class="logo">
+          <img src="assets/logo.png" alt="SB SFTP Logo" class="app-logo-img">
+          <div class="logo-text">
+            <span class="logo-title">SB SFTP Studio</span>
+            <span class="logo-subtitle">Multi-Client Remote SSH & SFTP Hub</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Live Server IP & Port Info Widget -->
+      <div class="header-center">
+        <div class="server-info-card" id="serverInfoWidget">
+          <div class="info-pill ip-pill" title="Local Server IP">
+            <i class="fa-solid fa-globe"></i>
+            <span class="pill-label">Server IP:</span>
+            <strong id="displayServerIp">127.0.0.1</strong>
+            <button class="btn-copy-chip" onclick="copyServerUrl()" title="Copy Full Web UI URL"><i class="fa-regular fa-copy"></i></button>
+          </div>
+          <div class="info-pill port-pill" onclick="openPortModal()" title="Click to change port">
+            <i class="fa-solid fa-network-wired"></i>
+            <span class="pill-label">Port:</span>
+            <strong id="displayServerPort">3000</strong>
+            <span class="badge-edit"><i class="fa-solid fa-gear"></i> Change</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="header-right">
+        <!-- Live Auto Refresh Widget -->
+        <div class="auto-refresh-widget" title="Auto-Refresh interval for file explorer">
+          <div class="auto-refresh-badge" id="autoRefreshBadge" onclick="triggerManualSync()" title="Click to sync now">
+            <i class="fa-solid fa-arrows-rotate" id="autoRefreshIcon"></i>
+            <span class="refresh-label">Auto-Sync</span>
+          </div>
+          <select id="autoRefreshSelect" onchange="handleAutoRefreshChange(this.value)">
+            <option value="0">Sync: Off</option>
+            <option value="3000">Sync: 3s</option>
+            <option value="5000" selected>Sync: 5s</option>
+            <option value="10000">Sync: 10s</option>
+            <option value="30000">Sync: 30s</option>
+          </select>
+        </div>
+
+        <div class="conn-status-pill" id="headerStatusPill">
+          <span class="status-dot disconnected" id="statusDot"></span>
+          <span class="status-text" id="statusText">Disconnected</span>
+        </div>
+
+        <!-- Global Font Zoom Widget -->
+        <div class="font-zoom-widget" title="Adjust Global Font Size (Ctrl/Cmd +/-)">
+          <button class="btn-zoom-step" onclick="decreaseGlobalFontSize()" title="Decrease Font Size (Ctrl/Cmd -)"><i class="fa-solid fa-minus"></i></button>
+          <span class="zoom-level-badge" id="zoomLevelBadge" onclick="resetGlobalFontSize()" title="Click to Reset Font Size (100%)">100%</span>
+          <button class="btn-zoom-step" onclick="increaseGlobalFontSize()" title="Increase Font Size (Ctrl/Cmd +)"><i class="fa-solid fa-plus"></i></button>
+        </div>
+
+        <!-- Theme & Preferences Button -->
+        <button class="btn-icon-subtle" onclick="openPreferencesModal()" title="Theme & Font Size Settings">
+          <i class="fa-solid fa-palette"></i>
+        </button>
+
+        <button class="btn-icon-subtle" onclick="openPortModal()" title="Server & Network Settings">
+          <i class="fa-solid fa-sliders"></i>
+        </button>
+      </div>
+    </header>
+
+    <!-- Hidden Native Browser Folder & File Inputs -->
+    <input type="file" id="browserFolderInput" webkitdirectory directory multiple style="display:none;" onchange="handleBrowserFolderSelected(event)">
+    <input type="file" id="browserFileInput" multiple style="display:none;" onchange="handleBrowserFilesSelected(event)">
+
+    <!-- Connection Toolbar & Multi-Client Selector -->
+    <section class="conn-toolbar">
+      <div class="toolbar-top">
+        <div class="profile-selector-group">
+          <label><i class="fa-solid fa-server"></i> Client Profile:</label>
+          <select id="profileSelect" onchange="handleClientProfileChange()">
+            <!-- Populated dynamically -->
+          </select>
+          <button type="button" class="btn-mini btn-manage-clients" onclick="openClientsModal()" title="Manage & Add Client Profiles">
+            <i class="fa-solid fa-users-gear"></i> Manage Clients
+          </button>
+          <button type="button" class="btn-mini" onclick="saveCurrentProfilePrompt()" title="Save current settings to selected client">
+            <i class="fa-solid fa-floppy-disk"></i> Save Client
+          </button>
+        </div>
+      </div>
+
+      <form id="connectionForm" onsubmit="handleConnect(event)" class="conn-form-grid">
+        <div class="form-field field-host">
+          <label for="sshHost"><i class="fa-solid fa-network-wired"></i> Remote Host / IP</label>
+          <div class="input-with-icon">
+            <input type="text" id="sshHost" placeholder="e.g. 192.168.1.100 or server.domain.com" required>
+          </div>
+        </div>
+
+        <div class="form-field field-port">
+          <label for="sshPort"><i class="fa-solid fa-hashtag"></i> SSH Port</label>
+          <input type="number" id="sshPort" value="22" required>
+        </div>
+
+        <div class="form-field field-user">
+          <label for="sshUser"><i class="fa-solid fa-user"></i> Username</label>
+          <input type="text" id="sshUser" placeholder="e.g. ubuntu, root, admin" required>
+        </div>
+
+        <div class="form-field field-pass">
+          <div class="label-with-action">
+            <label for="sshPassword"><i class="fa-solid fa-lock"></i> Password</label>
+            <label class="remember-pass-label" title="Remember password on this device">
+              <input type="checkbox" id="rememberPasswordCheck" checked> Remember
+            </label>
+          </div>
+          <div class="input-with-icon">
+            <input type="password" id="sshPassword" placeholder="Enter password">
+            <button type="button" class="btn-toggle-pass" onclick="togglePasswordVisibility()"><i class="fa-regular fa-eye" id="passEyeIcon"></i></button>
+          </div>
+        </div>
+
+        <div class="form-field field-key">
+          <label for="sshKeyPath"><i class="fa-solid fa-key"></i> Private Key (Optional)</label>
+          <input type="text" id="sshKeyPath" placeholder="~/.ssh/id_rsa">
+        </div>
+
+        <div class="form-actions">
+          <button type="submit" id="btnConnect" class="btn btn-connect">
+            <i class="fa-solid fa-link"></i> Connect
+          </button>
+          <button type="button" id="btnDisconnect" onclick="handleDisconnect()" class="btn btn-disconnect" disabled>
+            <i class="fa-solid fa-link-slash"></i> Disconnect
+          </button>
+        </div>
+      </form>
+    </section>
+
+    <!-- Main Dual File Manager Explorer -->
+    <main class="explorer-area">
+      <!-- Left Panel: Local Machine Files -->
+      <section class="explorer-panel local-explorer">
+        <div class="panel-topbar">
+          <div class="panel-title-area">
+            <div class="panel-icon local-icon"><i class="fa-solid fa-laptop-code"></i></div>
+            <div>
+              <h3>Local Filesystem</h3>
+              <span class="panel-subtitle" id="localHostLabel">Local Machine</span>
+            </div>
+          </div>
+          <div class="panel-quick-actions">
+            <button onclick="toggleRecentFilter('local')" class="btn-action btn-recent-filter" id="btnLocalRecent" title="Show Recently Transferred / Modified Files">
+              <i class="fa-solid fa-clock-rotate-left"></i> Recent
+            </button>
+            <button onclick="navigateLocalUp()" class="btn-action" title="Go to Parent Directory"><i class="fa-solid fa-arrow-up"></i></button>
+            <button onclick="refreshLocal()" class="btn-action" title="Refresh Local Directory"><i class="fa-solid fa-rotate-right"></i></button>
+            <button onclick="promptCreateLocalDir()" class="btn-action" id="btnLocalMkdir" title="Create New Local Directory"><i class="fa-solid fa-folder-plus"></i></button>
+            <button onclick="uploadCurrentLocalFolder()" class="btn-action btn-upload-folder" id="btnUploadCurrentFolder" title="Upload this Entire Directory to Remote SFTP" disabled><i class="fa-solid fa-folder-arrow-up"></i> Upload Dir</button>
+          </div>
+        </div>
+
+        <!-- Breadcrumb & Search Bar -->
+        <div class="navigation-bar">
+          <div class="breadcrumb-container" id="localBreadcrumb"></div>
+          <div class="search-box">
+            <i class="fa-solid fa-magnifying-glass search-icon"></i>
+            <input type="text" id="localSearchInput" placeholder="Filter local files..." oninput="filterLocalFiles(this.value)">
+          </div>
+        </div>
+
+        <!-- Local Files Table -->
+        <div class="table-container">
+          <table class="explorer-table">
+            <thead>
+              <tr>
+                <th class="col-icon"></th>
+                <th class="col-name" id="localHeaderName" onclick="sortFiles('local', 'name')">Name <i class="fa-solid fa-sort sort-indicator"></i></th>
+                <th class="col-size" id="localHeaderSize" onclick="sortFiles('local', 'size')">Size <i class="fa-solid fa-sort sort-indicator"></i></th>
+                <th class="col-date active" id="localHeaderDate" onclick="sortFiles('local', 'modifyTime')">Modified <i class="fa-solid fa-arrow-down-wide-short sort-indicator"></i></th>
+                <th class="col-action">Action</th>
+              </tr>
+            </thead>
+            <tbody id="localFileBody">
+              <tr>
+                <td colspan="5" class="empty-state">
+                  <i class="fa-solid fa-spinner fa-spin"></i> Loading local directory...
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Right Panel: Remote SFTP Files -->
+      <section class="explorer-panel remote-explorer" id="remoteExplorerPanel">
+        <div class="panel-topbar">
+          <div class="panel-title-area">
+            <div class="panel-icon remote-icon"><i class="fa-solid fa-server"></i></div>
+            <div>
+              <h3>Remote SFTP</h3>
+              <span class="panel-subtitle" id="remoteHostLabel">Remote Host / SFTP Server</span>
+            </div>
+          </div>
+          <div class="panel-quick-actions">
+            <button onclick="toggleRecentFilter('remote')" class="btn-action btn-recent-filter" id="btnRemoteRecent" title="Show Recently Transferred / Modified Files" disabled>
+              <i class="fa-solid fa-clock-rotate-left"></i> Recent
+            </button>
+            <button onclick="navigateRemoteUp()" class="btn-action" id="btnRemoteUp" title="Go to Parent Directory" disabled><i class="fa-solid fa-arrow-up"></i></button>
+            <button onclick="refreshRemote()" class="btn-action" id="btnRemoteRefresh" title="Refresh Remote Directory" disabled><i class="fa-solid fa-rotate-right"></i></button>
+            <button onclick="promptCreateRemoteDir()" class="btn-action" id="btnRemoteMkdir" title="Create New Directory" disabled><i class="fa-solid fa-folder-plus"></i></button>
+            <button onclick="triggerBrowserFolderUpload()" class="btn-action btn-upload-folder" id="btnRemoteUploadFolder" title="Upload folder from computer" disabled><i class="fa-solid fa-cloud-arrow-up"></i> Upload Folder</button>
+            <button onclick="triggerBrowserFileUpload()" class="btn-action" id="btnRemoteUploadFiles" title="Upload files from computer" disabled><i class="fa-solid fa-file-arrow-up"></i></button>
+          </div>
+        </div>
+
+        <!-- Breadcrumb & Search Bar -->
+        <div class="navigation-bar">
+          <div class="breadcrumb-container" id="remoteBreadcrumb">
+            <span class="breadcrumb-item active">/</span>
+          </div>
+          <div class="search-box">
+            <i class="fa-solid fa-magnifying-glass search-icon"></i>
+            <input type="text" id="remoteSearchInput" placeholder="Filter remote files..." oninput="filterRemoteFiles(this.value)" disabled>
+          </div>
+        </div>
+
+        <!-- Dropzone Overlay for Drag and Drop Folder/File Upload -->
+        <div class="dropzone-overlay" id="remoteDropzoneOverlay">
+          <div class="dropzone-box">
+            <i class="fa-solid fa-folder-open dropzone-icon"></i>
+            <h4>Drop Folders or Files Here</h4>
+            <p>Direct upload to <span id="dropzonePathLabel">/</span></p>
+          </div>
+        </div>
+
+        <!-- Remote Files Table -->
+        <div class="table-container">
+          <table class="explorer-table">
+            <thead>
+              <tr>
+                <th class="col-icon"></th>
+                <th class="col-name" id="remoteHeaderName" onclick="sortFiles('remote', 'name')">Name <i class="fa-solid fa-sort sort-indicator"></i></th>
+                <th class="col-size" id="remoteHeaderSize" onclick="sortFiles('remote', 'size')">Size <i class="fa-solid fa-sort sort-indicator"></i></th>
+                <th class="col-date active" id="remoteHeaderDate" onclick="sortFiles('remote', 'modifyTime')">Modified <i class="fa-solid fa-arrow-down-wide-short sort-indicator"></i></th>
+                <th class="col-perm">Perm</th>
+                <th class="col-action">Action</th>
+              </tr>
+            </thead>
+            <tbody id="remoteFileBody">
+              <tr>
+                <td colspan="6" class="empty-state">
+                  <div class="empty-illustration">
+                    <i class="fa-solid fa-tower-broadcast"></i>
+                    <p>Enter connection parameters above and click <strong>Connect</strong> to explore remote files.</p>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <!-- Live Animated Transfer Activity HUD (Visible during upload/download) -->
+    <div class="transfer-hud" id="transferHud">
+      <div class="hud-left">
+        <div class="hud-anim-orb">
+          <div class="hud-pulse-ring"></div>
+          <i class="fa-solid fa-cloud-arrow-up hud-orb-icon" id="hudOrbIcon"></i>
+        </div>
+        <div class="hud-details">
+          <div class="hud-header-line">
+            <span class="hud-badge-direction" id="hudDirectionBadge"><i class="fa-solid fa-arrow-up"></i> UPLOADING</span>
+            <span class="hud-filename" id="hudFileName">file_name.zip</span>
+            <span class="hud-batch-counter" id="hudBatchCounter">Task 1 of 5</span>
+          </div>
+          <div class="hud-stats-line">
+            <span class="hud-size-progress"><strong id="hudTransferredSize">0 MB</strong> / <span id="hudTotalSize">0 MB</span></span>
+            <span class="hud-bullet">•</span>
+            <span class="hud-speed-gauge"><i class="fa-solid fa-bolt text-accent"></i> <span id="hudSpeed">0 B/s</span></span>
+            <span class="hud-bullet">•</span>
+            <span class="hud-eta-gauge"><i class="fa-regular fa-clock"></i> ETA: <span id="hudEta">--:--</span></span>
+          </div>
+        </div>
+      </div>
+      <div class="hud-right">
+        <div class="hud-progress-box">
+          <div class="hud-progress-track">
+            <div class="hud-progress-fill" id="hudProgressFill" style="width: 0%;">
+              <div class="hud-shimmer"></div>
+            </div>
+          </div>
+          <span class="hud-pct-text" id="hudPctText">0%</span>
+        </div>
+        <button class="btn-hud-dock" onclick="switchDockTab('transfers')" title="Open Transfers Dock">
+          <i class="fa-solid fa-arrow-up-right-from-square"></i>
+        </button>
+      </div>
+    </div>
+
+    <!-- Bottom Dock: Transfer Queue & Terminal Console -->
+    <footer class="bottom-dock" id="bottomDock">
+      <div class="dock-tabs-nav">
+        <button class="dock-tab-btn active" id="dockBtnTransfers" onclick="switchDockTab('transfers')">
+          <i class="fa-solid fa-arrow-right-arrow-left"></i> Transfers
+          <span class="tab-badge" id="transferBadge">0</span>
+        </button>
+        <button class="dock-tab-btn" id="dockBtnTerminal" onclick="switchDockTab('terminal')">
+          <i class="fa-solid fa-terminal"></i> Remote SSH Terminal
+        </button>
+      </div>
+
+      <!-- Dock Tab 1: Transfers -->
+      <div class="dock-tab-content active" id="dockTabTransfers">
+        <div class="dock-control-bar">
+          <div class="dock-summary" id="dockSummary">
+            <span class="status-indicator-dot" id="dockTransferDot"></span>
+            <span id="dockSummaryText">0 active transfers</span>
+          </div>
+          <div class="dock-actions">
+            <button class="btn-mini btn-clear-transfers" onclick="clearCompletedTransfers()"><i class="fa-solid fa-broom"></i> Clear Finished</button>
+          </div>
+        </div>
+        <div class="transfers-wrapper">
+          <table class="queue-table">
+            <thead>
+              <tr>
+                <th>File / Item</th>
+                <th>Direction</th>
+                <th>Local Path</th>
+                <th>Remote Path</th>
+                <th style="width: 170px;">Progress</th>
+                <th>Size</th>
+                <th>Speed</th>
+                <th>ETA</th>
+                <th>Status</th>
+                <th style="width: 80px;">Action</th>
+              </tr>
+            </thead>
+            <tbody id="queueBody">
+              <tr>
+                <td colspan="10" class="empty-queue-msg">
+                  <i class="fa-solid fa-inbox"></i> No file transfers in progress. Click <strong>Upload</strong> or <strong>Download</strong> on any file or folder.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Dock Tab 2: Remote Terminal (Docked State) -->
+      <div class="dock-tab-content" id="dockTabTerminal">
+        <div class="terminal-view" id="terminalViewContainer">
+          <!-- Terminal Toolbar: Quick Commands & Font Size & Detach Controls -->
+          <div class="terminal-presets">
+            <span class="preset-label">Quick:</span>
+            <button class="chip" onclick="execQuickCommand('uname -a')">uname -a</button>
+            <button class="chip" onclick="execQuickCommand('uptime')">uptime</button>
+            <button class="chip" onclick="execQuickCommand('df -h')">df -h</button>
+            <button class="chip" onclick="execQuickCommand('free -m')">free -m</button>
+            <button class="chip" onclick="execQuickCommand('whoami')">whoami</button>
+            <button class="chip" onclick="execQuickCommand('cat /etc/os-release')">os-release</button>
+            <button class="chip" onclick="execQuickCommand('top -b -n 1 | head -n 12')">top</button>
+            <button class="chip" onclick="execQuickCommand('ls -la')">ls -la</button>
+
+            <!-- Terminal Customization & Detach Controls -->
+            <div class="terminal-ctrl-group">
+              <div class="term-font-adjuster" title="Terminal Font Size">
+                <button class="btn-term-font" onclick="adjustTermFontSize(-1)" title="Decrease font size"><i class="fa-solid fa-font"></i>-</button>
+                <span class="term-font-val" id="termFontDisplay">12px</span>
+                <button class="btn-term-font" onclick="adjustTermFontSize(1)" title="Increase font size"><i class="fa-solid fa-font"></i>+</button>
+              </div>
+              <button class="btn-term-ctrl" onclick="clearTerminal()"><i class="fa-solid fa-broom"></i> Clear</button>
+              <button class="btn-term-ctrl btn-detach-action" onclick="toggleDetachTerminal()" id="btnDetachTerm" title="Detach Terminal into Floating Window">
+                <i class="fa-solid fa-up-right-from-square"></i> <span id="detachBtnLabel">Detach</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Output Log -->
+          <div class="terminal-logs" id="terminalOutput">
+            <div class="term-msg info">SSH Terminal ready. Connect to execute remote commands.</div>
+          </div>
+
+          <!-- Command Input Bar -->
+          <form class="terminal-input-bar" onsubmit="handleExecCommand(event)">
+            <span class="term-prompt" id="termPromptLabel">user@remote:~$</span>
+            <input type="text" id="termInput" placeholder="Enter shell command..." disabled autocomplete="off">
+            <button type="submit" id="btnExec" class="btn-exec" disabled><i class="fa-solid fa-paper-plane"></i> Run</button>
+          </form>
+        </div>
+      </div>
+    </footer>
+  </div>
+
+  <!-- Detachable Floating SSH Terminal Window -->
+  <div class="floating-terminal-window" id="floatingTerminalWindow">
+    <div class="floating-term-header" id="floatingTermHeader">
+      <div class="floating-term-title">
+        <i class="fa-solid fa-terminal text-accent"></i>
+        <span id="floatingTermTitleText">SSH Terminal Window</span>
+      </div>
+      <div class="floating-term-controls">
+        <div class="term-font-adjuster">
+          <button class="btn-term-font" onclick="adjustTermFontSize(-1)"><i class="fa-solid fa-font"></i>-</button>
+          <span class="term-font-val" id="floatingFontDisplay">12px</span>
+          <button class="btn-term-font" onclick="adjustTermFontSize(1)"><i class="fa-solid fa-font"></i>+</button>
+        </div>
+        <button class="btn-float-ctrl" onclick="minimizeFloatingTerminal()" title="Minimize"><i class="fa-solid fa-minus"></i></button>
+        <button class="btn-float-ctrl" onclick="maximizeFloatingTerminal()" title="Maximize / Restore" id="btnMaxFloat"><i class="fa-solid fa-expand"></i></button>
+        <button class="btn-float-ctrl btn-dock-back" onclick="dockTerminal()" title="Dock Back into Bottom Panel"><i class="fa-solid fa-down-left-and-up-right-to-center"></i> Dock</button>
+      </div>
+    </div>
+    <div class="floating-term-body" id="floatingTermBody">
+      <!-- Terminal View gets moved here when detached -->
+    </div>
+    <div class="floating-term-resizer" id="floatingTermResizer"></div>
+  </div>
+
+  <!-- In-App File Viewer & Preview Modal -->
+  <div class="modal-overlay" id="fileViewerModal">
+    <div class="modal-card file-viewer-card">
+      <div class="modal-header">
+        <div class="modal-title">
+          <i class="fa-regular fa-file-lines text-accent" id="viewerIcon"></i>
+          <div>
+            <h3 id="viewerFileName">file_preview.txt</h3>
+            <span class="viewer-meta-subtitle" id="viewerMetaSubtitle">Local File • 12 KB • Modified Today</span>
+          </div>
+        </div>
+        <div class="viewer-header-actions">
+          <button class="btn-mini btn-viewer-action" onclick="copyViewerContent()" id="btnCopyViewer" title="Copy Content"><i class="fa-regular fa-copy"></i> Copy</button>
+          <button class="btn-mini btn-viewer-action" onclick="downloadViewerFile()" id="btnDownloadViewer" title="Download File"><i class="fa-solid fa-download"></i> Download</button>
+          <button class="btn-close-modal" onclick="closeFileViewer()"><i class="fa-solid fa-xmark"></i></button>
+        </div>
+      </div>
+
+      <div class="modal-body file-viewer-body" id="fileViewerBody">
+        <div class="viewer-loading" id="viewerLoading">
+          <i class="fa-solid fa-spinner fa-spin"></i> Loading file preview...
+        </div>
+        <div class="viewer-content-container" id="viewerContentContainer" style="display: none;">
+          <!-- Content or Image injected here -->
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <span class="viewer-footer-path" id="viewerFooterPath">/path/to/file</span>
+        <button class="btn btn-primary" onclick="closeFileViewer()">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Multi-Client Profiles Manager Modal -->
+  <div class="modal-overlay" id="clientsModal">
+    <div class="modal-card clients-card">
+      <div class="modal-header">
+        <div class="modal-title">
+          <i class="fa-solid fa-users-gear text-accent"></i>
+          <h3>Client Profiles Manager</h3>
+        </div>
+        <div class="modal-header-actions">
+          <button class="btn btn-primary btn-sm" onclick="showNewClientForm()"><i class="fa-solid fa-plus"></i> Add Client</button>
+          <button class="btn-close-modal" onclick="closeClientsModal()"><i class="fa-solid fa-xmark"></i></button>
+        </div>
+      </div>
+
+      <div class="modal-body">
+        <p class="section-desc">Manage multiple SSH & SFTP connections. Click <strong>Connect</strong> to switch to any saved client profile immediately.</p>
+
+        <!-- New / Edit Client Form (Collapsible) -->
+        <div class="client-edit-form" id="clientEditForm" style="display: none;">
+          <h4 id="clientFormTitle"><i class="fa-solid fa-pen-to-square"></i> Add New Client Profile</h4>
+          <input type="hidden" id="editClientId">
+          <div class="client-form-grid">
+            <div class="form-field">
+              <label>Profile Nickname / Label:</label>
+              <input type="text" id="editClientName" placeholder="e.g. Raspberry Pi 4 (Home)" required>
+            </div>
+            <div class="form-field">
+              <label>Remote Host / IP:</label>
+              <input type="text" id="editClientHost" placeholder="192.168.1.100 or host.domain" required>
+            </div>
+            <div class="form-field">
+              <label>SSH Port:</label>
+              <input type="number" id="editClientPort" value="22" required>
+            </div>
+            <div class="form-field">
+              <label>Username:</label>
+              <input type="text" id="editClientUser" placeholder="pi" required>
+            </div>
+            <div class="form-field">
+              <label>Password (Optional):</label>
+              <input type="password" id="editClientPassword" placeholder="Enter password to remember">
+            </div>
+            <div class="form-field">
+              <label>Private Key Path (Optional):</label>
+              <input type="text" id="editClientKeyPath" placeholder="~/.ssh/id_rsa">
+            </div>
+          </div>
+          <div class="client-form-actions">
+            <button type="button" class="btn btn-secondary btn-sm" onclick="hideClientForm()">Cancel</button>
+            <button type="button" class="btn btn-primary btn-sm" onclick="saveClientFromForm()"><i class="fa-solid fa-check"></i> Save Client Profile</button>
+          </div>
+        </div>
+
+        <!-- Saved Clients List Grid -->
+        <div class="clients-list-grid" id="clientsListGrid">
+          <!-- Populated dynamically -->
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <div class="client-backup-actions">
+          <button class="btn btn-secondary btn-sm" onclick="exportClientProfiles()"><i class="fa-solid fa-file-export"></i> Export JSON</button>
+          <button class="btn btn-secondary btn-sm" onclick="triggerImportProfiles()"><i class="fa-solid fa-file-import"></i> Import JSON</button>
+          <input type="file" id="importProfilesInput" accept=".json" style="display: none;" onchange="handleImportProfilesFile(event)">
+        </div>
+        <button class="btn btn-primary" onclick="closeClientsModal()">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Preferences & Themes Modal -->
+  <div class="modal-overlay" id="preferencesModal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div class="modal-title">
+          <i class="fa-solid fa-palette text-accent"></i>
+          <h3>Themes & Display Preferences</h3>
+        </div>
+        <button class="btn-close-modal" onclick="closePreferencesModal()"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+
+      <div class="modal-body">
+        <!-- Theme Selection Section -->
+        <div class="settings-section">
+          <h4><i class="fa-solid fa-brush"></i> UI Color Themes</h4>
+          <p class="section-desc">Select from 13 professional dark & light themes to personalize your workspace:</p>
+          
+          <h5 class="theme-category-title"><i class="fa-solid fa-moon"></i> Professional Dark Themes</h5>
+          <div class="theme-grid">
+            <div class="theme-card active" data-theme="theme-midnight" onclick="setTheme('theme-midnight')">
+              <div class="theme-swatch swatch-midnight"></div>
+              <div class="theme-info">
+                <strong>Midnight Neon</strong>
+                <span>Dark Indigo & Cyan (Default)</span>
+              </div>
+            </div>
+            <div class="theme-card" data-theme="theme-github-dark" onclick="setTheme('theme-github-dark')">
+              <div class="theme-swatch swatch-github-dark"></div>
+              <div class="theme-info">
+                <strong>GitHub Dark Dimmed</strong>
+                <span>Slate Navy & Emerald</span>
+              </div>
+            </div>
+            <div class="theme-card" data-theme="theme-vscode-dark" onclick="setTheme('theme-vscode-dark')">
+              <div class="theme-swatch swatch-vscode-dark"></div>
+              <div class="theme-info">
+                <strong>VS Code Modern</strong>
+                <span>Charcoal & Studio Blue</span>
+              </div>
+            </div>
+            <div class="theme-card" data-theme="theme-onedark" onclick="setTheme('theme-onedark')">
+              <div class="theme-swatch swatch-onedark"></div>
+              <div class="theme-info">
+                <strong>One Dark Pro</strong>
+                <span>Atom Syntax & Vivid Accents</span>
+              </div>
+            </div>
+            <div class="theme-card" data-theme="theme-catppuccin" onclick="setTheme('theme-catppuccin')">
+              <div class="theme-swatch swatch-catppuccin"></div>
+              <div class="theme-info">
+                <strong>Catppuccin Mocha</strong>
+                <span>Soothing Modern Dark Pastel</span>
+              </div>
+            </div>
+            <div class="theme-card" data-theme="theme-nord" onclick="setTheme('theme-nord')">
+              <div class="theme-swatch swatch-nord"></div>
+              <div class="theme-info">
+                <strong>Nordic Frost</strong>
+                <span>Arctic Slate & Glacier Blue</span>
+              </div>
+            </div>
+            <div class="theme-card" data-theme="theme-dracula" onclick="setTheme('theme-dracula')">
+              <div class="theme-swatch swatch-dracula"></div>
+              <div class="theme-info">
+                <strong>Cyber Dracula</strong>
+                <span>Neon Violet & Hot Pink</span>
+              </div>
+            </div>
+            <div class="theme-card" data-theme="theme-matrix" onclick="setTheme('theme-matrix')">
+              <div class="theme-swatch swatch-matrix"></div>
+              <div class="theme-info">
+                <strong>Emerald Matrix</strong>
+                <span>Deep Black & Terminal Green</span>
+              </div>
+            </div>
+            <div class="theme-card" data-theme="theme-solarized" onclick="setTheme('theme-solarized')">
+              <div class="theme-swatch swatch-solarized"></div>
+              <div class="theme-info">
+                <strong>Solarized Dark</strong>
+                <span>Warm Teal & Amber Glow</span>
+              </div>
+            </div>
+          </div>
+
+          <h5 class="theme-category-title" style="margin-top: 14px;"><i class="fa-solid fa-sun"></i> Clean Light Themes</h5>
+          <div class="theme-grid">
+            <div class="theme-card" data-theme="theme-light" onclick="setTheme('theme-light')">
+              <div class="theme-swatch swatch-light"></div>
+              <div class="theme-info">
+                <strong>Paper Light</strong>
+                <span>Clean & Crisp Daylight</span>
+              </div>
+            </div>
+            <div class="theme-card" data-theme="theme-github-light" onclick="setTheme('theme-github-light')">
+              <div class="theme-swatch swatch-github-light"></div>
+              <div class="theme-info">
+                <strong>GitHub Light Modern</strong>
+                <span>Cool Gray, Pure White & Blue</span>
+              </div>
+            </div>
+            <div class="theme-card" data-theme="theme-nord-light" onclick="setTheme('theme-nord-light')">
+              <div class="theme-swatch swatch-nord-light"></div>
+              <div class="theme-info">
+                <strong>Nord Snow Storm</strong>
+                <span>Frosty Platinum & Polar Blue</span>
+              </div>
+            </div>
+            <div class="theme-card" data-theme="theme-solarized-light" onclick="setTheme('theme-solarized-light')">
+              <div class="theme-swatch swatch-solarized-light"></div>
+              <div class="theme-info">
+                <strong>Solarized Light</strong>
+                <span>Parchment Cream & Yellow Teal</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- UI & Terminal Font Size Section -->
+        <div class="settings-section">
+          <h4><i class="fa-solid fa-text-height"></i> Font Size & Zoom Adjustments</h4>
+          <div class="font-settings-row">
+            <div class="font-setting-item">
+              <label>UI Global Scale (Shortcut: <kbd>Ctrl/Cmd +</kbd> / <kbd>Ctrl/Cmd -</kbd>):</label>
+              <div class="font-chips">
+                <button class="chip font-chip" data-size="font-size-xs" onclick="setUiFontSize('font-size-xs')">Tiny (10.5px)</button>
+                <button class="chip font-chip" data-size="font-size-sm" onclick="setUiFontSize('font-size-sm')">Compact (11.5px)</button>
+                <button class="chip font-chip active" data-size="font-size-md" onclick="setUiFontSize('font-size-md')">Standard (13px)</button>
+                <button class="chip font-chip" data-size="font-size-lg" onclick="setUiFontSize('font-size-lg')">Large (14.5px)</button>
+                <button class="chip font-chip" data-size="font-size-xl" onclick="setUiFontSize('font-size-xl')">Extra (16px)</button>
+                <button class="chip font-chip" data-size="font-size-2xl" onclick="setUiFontSize('font-size-2xl')">Huge (18px)</button>
+              </div>
+            </div>
+
+            <div class="font-setting-item">
+              <label>Terminal Font Size:</label>
+              <div class="font-chips">
+                <button class="chip term-chip" data-tsize="11" onclick="setTermFontSize(11)">11px</button>
+                <button class="chip term-chip active" data-tsize="12" onclick="setTermFontSize(12)">12px</button>
+                <button class="chip term-chip" data-tsize="14" onclick="setTermFontSize(14)">14px</button>
+                <button class="chip term-chip" data-tsize="16" onclick="setTermFontSize(16)">16px</button>
+                <button class="chip term-chip" data-tsize="18" onclick="setTermFontSize(18)">18px</button>
+                <button class="chip term-chip" data-tsize="20" onclick="setTermFontSize(20)">20px</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn btn-primary" onclick="closePreferencesModal()">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Port & Server Network Settings Modal -->
+  <div class="modal-overlay" id="portModal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div class="modal-title">
+          <i class="fa-solid fa-sliders text-accent"></i>
+          <h3>Server & Network Settings</h3>
+        </div>
+        <button class="btn-close-modal" onclick="closePortModal()"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+
+      <div class="modal-body">
+        <!-- Network IP Addresses List -->
+        <div class="settings-section">
+          <h4><i class="fa-solid fa-network-wired"></i> Detected Server IP Addresses</h4>
+          <p class="section-desc">Access this SFTP Web UI from other devices on your local network using any of these addresses:</p>
+          <div class="ip-address-list" id="ipAddressList">
+            <div class="ip-item">
+              <span class="ip-name">Localhost</span>
+              <code class="ip-code">http://127.0.0.1:<span class="curr-port-lbl">3000</span></code>
+              <button class="btn-copy" onclick="copyText('http://127.0.0.1:3000')"><i class="fa-regular fa-copy"></i></button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Port Changer Form -->
+        <div class="settings-section">
+          <h4><i class="fa-solid fa-plug"></i> Web UI Server Port</h4>
+          <p class="section-desc">Change the default <code>3000</code> port. The server will restart on the new port immediately.</p>
+          <div class="port-change-group">
+            <div class="input-with-label">
+              <label for="newPortInput">New Port (1024 - 65535):</label>
+              <input type="number" id="newPortInput" min="1024" max="65535" value="3000">
+            </div>
+            <div class="quick-port-chips">
+              <button class="chip" onclick="setPortField(3000)">3000</button>
+              <button class="chip" onclick="setPortField(8080)">8080</button>
+              <button class="chip" onclick="setPortField(5000)">5000</button>
+              <button class="chip" onclick="setPortField(9000)">9000</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closePortModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="submitPortChange()" id="btnSubmitPort">
+          <i class="fa-solid fa-arrows-rotate"></i> Update & Switch Port
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Notification Container -->
+  <div class="toast-container" id="toastContainer"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
