@@ -153,7 +153,7 @@
     <!-- Main Dual File Manager Explorer -->
     <main class="explorer-area">
       <!-- Left Panel: Local Machine Files -->
-      <section class="explorer-panel local-explorer">
+      <section class="explorer-panel local-explorer" id="localExplorerPanel" tabindex="0">
         <div class="panel-topbar">
           <div class="panel-title-area">
             <div class="panel-icon local-icon"><i class="fa-solid fa-laptop-code"></i></div>
@@ -163,11 +163,15 @@
             </div>
           </div>
           <div class="panel-quick-actions">
+            <button onclick="navigateLocalHistoryBack()" class="btn-action" id="btnLocalBack" title="Back in History (Alt+Left)" disabled><i class="fa-solid fa-arrow-left"></i></button>
+            <button onclick="navigateLocalHistoryForward()" class="btn-action" id="btnLocalForward" title="Forward in History (Alt+Right)" disabled><i class="fa-solid fa-arrow-right"></i></button>
+            <button onclick="navigateLocalUp()" class="btn-action" id="btnLocalUp" title="Go to Parent Directory (Alt+Up)"><i class="fa-solid fa-arrow-up"></i></button>
+            <button onclick="navigateLocalHome()" class="btn-action" id="btnLocalHome" title="Go to Downloads Directory"><i class="fa-solid fa-house"></i></button>
+            <button onclick="toggleQuickAccessPopover()" class="btn-action btn-quick-access-btn" id="btnLocalQuickAccess" title="Quick Access: Frequently & Last Visited Folders"><i class="fa-solid fa-bolt"></i></button>
+            <button onclick="refreshLocal()" class="btn-action" id="btnLocalRefresh" title="Refresh Local Directory"><i class="fa-solid fa-rotate-right"></i></button>
             <button onclick="toggleRecentFilter('local')" class="btn-action btn-recent-filter" id="btnLocalRecent" title="Show Recently Transferred / Modified Files">
               <i class="fa-solid fa-clock-rotate-left"></i> Recent
             </button>
-            <button onclick="navigateLocalUp()" class="btn-action" title="Go to Parent Directory"><i class="fa-solid fa-arrow-up"></i></button>
-            <button onclick="refreshLocal()" class="btn-action" title="Refresh Local Directory"><i class="fa-solid fa-rotate-right"></i></button>
             <button onclick="promptCreateLocalDir()" class="btn-action" id="btnLocalMkdir" title="Create New Local Directory"><i class="fa-solid fa-folder-plus"></i></button>
             <button onclick="uploadCurrentLocalFolder()" class="btn-action btn-upload-folder" id="btnUploadCurrentFolder" title="Upload this Entire Directory to Remote SFTP" disabled><i class="fa-solid fa-folder-arrow-up"></i> Upload Dir</button>
           </div>
@@ -178,15 +182,66 @@
           <div class="breadcrumb-container" id="localBreadcrumb"></div>
           <div class="search-box">
             <i class="fa-solid fa-magnifying-glass search-icon"></i>
-            <input type="text" id="localSearchInput" placeholder="Filter local files..." oninput="filterLocalFiles(this.value)">
+            <input type="text" id="localSearchInput" placeholder="Filter local files (Ctrl/Cmd+F)..." oninput="filterLocalFiles(this.value)">
+          </div>
+        </div>
+
+        <!-- Local Quick Access Popover Menu -->
+        <div class="quick-access-popover" id="localQuickAccessPopover" style="display: none;">
+          <div class="quick-access-header">
+            <span><i class="fa-solid fa-bolt text-accent"></i> Quick Access & Places</span>
+            <button class="btn-close-popover" onclick="closeQuickAccessPopover()"><i class="fa-solid fa-xmark"></i></button>
+          </div>
+          <div class="quick-access-section">
+            <div class="quick-access-section-title"><i class="fa-solid fa-location-dot"></i> Common Places</div>
+            <div class="quick-access-grid" id="localCommonPlacesGrid">
+              <!-- Injected by app.js: Downloads, Desktop, Documents, Home -->
+            </div>
+          </div>
+          <div class="quick-access-section" id="sectionFreqPaths">
+            <div class="quick-access-section-title"><i class="fa-solid fa-fire"></i> Frequently Visited Folders</div>
+            <div class="quick-access-list" id="localFreqPathsList">
+              <!-- Injected by app.js -->
+            </div>
+          </div>
+          <div class="quick-access-section" id="sectionRecentPaths">
+            <div class="quick-access-section-title"><i class="fa-solid fa-clock-rotate-left"></i> Last Accessed Paths</div>
+            <div class="quick-access-list" id="localRecentPathsList">
+              <!-- Injected by app.js -->
+            </div>
+          </div>
+          <div class="quick-access-footer">
+            <button class="btn-mini btn-clear-history" onclick="clearLocalPathHistory()"><i class="fa-solid fa-trash-can"></i> Clear History</button>
+          </div>
+        </div>
+
+        <!-- Local Batch Action Bar -->
+        <div class="batch-actions-bar" id="localBatchBar" style="display: none;">
+          <div class="batch-info">
+            <span class="batch-count-badge" id="localBatchCount">0 selected</span>
+            <span class="batch-size" id="localBatchSize">(0 B)</span>
+          </div>
+          <div class="batch-btns">
+            <button class="btn-batch btn-batch-upload" id="btnBatchUploadLocal" onclick="uploadSelectedLocalItems()" title="Upload selected files/folders to Remote SFTP" disabled>
+              <i class="fa-solid fa-cloud-arrow-up"></i> Upload Selected (<span id="localBatchUploadNum">0</span>)
+            </button>
+            <button class="btn-batch btn-batch-delete" onclick="deleteSelectedItems('local')" title="Delete selected local files">
+              <i class="fa-solid fa-trash-can"></i> Delete Selected
+            </button>
+            <button class="btn-batch btn-batch-clear" onclick="clearSelection('local')" title="Clear selection (Esc)">
+              <i class="fa-solid fa-xmark"></i> Clear
+            </button>
           </div>
         </div>
 
         <!-- Local Files Table -->
-        <div class="table-container">
-          <table class="explorer-table">
+        <div class="table-container" id="localTableContainer">
+          <table class="explorer-table" id="localTable">
             <thead>
               <tr>
+                <th class="col-checkbox">
+                  <input type="checkbox" id="localSelectAll" onchange="toggleSelectAll('local', this.checked)" title="Select All (Ctrl/Cmd+A)">
+                </th>
                 <th class="col-icon"></th>
                 <th class="col-name" id="localHeaderName" onclick="sortFiles('local', 'name')">Name <i class="fa-solid fa-sort sort-indicator"></i></th>
                 <th class="col-size" id="localHeaderSize" onclick="sortFiles('local', 'size')">Size <i class="fa-solid fa-sort sort-indicator"></i></th>
@@ -196,7 +251,7 @@
             </thead>
             <tbody id="localFileBody">
               <tr>
-                <td colspan="5" class="empty-state">
+                <td colspan="6" class="empty-state">
                   <i class="fa-solid fa-spinner fa-spin"></i> Loading local directory...
                 </td>
               </tr>
@@ -206,7 +261,7 @@
       </section>
 
       <!-- Right Panel: Remote SFTP Files -->
-      <section class="explorer-panel remote-explorer" id="remoteExplorerPanel">
+      <section class="explorer-panel remote-explorer" id="remoteExplorerPanel" tabindex="0">
         <div class="panel-topbar">
           <div class="panel-title-area">
             <div class="panel-icon remote-icon"><i class="fa-solid fa-server"></i></div>
@@ -216,11 +271,14 @@
             </div>
           </div>
           <div class="panel-quick-actions">
+            <button onclick="navigateRemoteHistoryBack()" class="btn-action" id="btnRemoteBack" title="Back in History (Alt+Left)" disabled><i class="fa-solid fa-arrow-left"></i></button>
+            <button onclick="navigateRemoteHistoryForward()" class="btn-action" id="btnRemoteForward" title="Forward in History (Alt+Right)" disabled><i class="fa-solid fa-arrow-right"></i></button>
+            <button onclick="navigateRemoteUp()" class="btn-action" id="btnRemoteUp" title="Go to Parent Directory (Alt+Up)" disabled><i class="fa-solid fa-arrow-up"></i></button>
+            <button onclick="navigateRemoteHome()" class="btn-action" id="btnRemoteHome" title="Go to Remote Home Directory" disabled><i class="fa-solid fa-house"></i></button>
+            <button onclick="refreshRemote()" class="btn-action" id="btnRemoteRefresh" title="Refresh Remote Directory" disabled><i class="fa-solid fa-rotate-right"></i></button>
             <button onclick="toggleRecentFilter('remote')" class="btn-action btn-recent-filter" id="btnRemoteRecent" title="Show Recently Transferred / Modified Files" disabled>
               <i class="fa-solid fa-clock-rotate-left"></i> Recent
             </button>
-            <button onclick="navigateRemoteUp()" class="btn-action" id="btnRemoteUp" title="Go to Parent Directory" disabled><i class="fa-solid fa-arrow-up"></i></button>
-            <button onclick="refreshRemote()" class="btn-action" id="btnRemoteRefresh" title="Refresh Remote Directory" disabled><i class="fa-solid fa-rotate-right"></i></button>
             <button onclick="promptCreateRemoteDir()" class="btn-action" id="btnRemoteMkdir" title="Create New Directory" disabled><i class="fa-solid fa-folder-plus"></i></button>
             <button onclick="triggerBrowserFolderUpload()" class="btn-action btn-upload-folder" id="btnRemoteUploadFolder" title="Upload folder from computer" disabled><i class="fa-solid fa-cloud-arrow-up"></i> Upload Folder</button>
             <button onclick="triggerBrowserFileUpload()" class="btn-action" id="btnRemoteUploadFiles" title="Upload files from computer" disabled><i class="fa-solid fa-file-arrow-up"></i></button>
@@ -234,7 +292,26 @@
           </div>
           <div class="search-box">
             <i class="fa-solid fa-magnifying-glass search-icon"></i>
-            <input type="text" id="remoteSearchInput" placeholder="Filter remote files..." oninput="filterRemoteFiles(this.value)" disabled>
+            <input type="text" id="remoteSearchInput" placeholder="Filter remote files (Ctrl/Cmd+F)..." oninput="filterRemoteFiles(this.value)" disabled>
+          </div>
+        </div>
+
+        <!-- Remote Batch Action Bar -->
+        <div class="batch-actions-bar" id="remoteBatchBar" style="display: none;">
+          <div class="batch-info">
+            <span class="batch-count-badge" id="remoteBatchCount">0 selected</span>
+            <span class="batch-size" id="remoteBatchSize">(0 B)</span>
+          </div>
+          <div class="batch-btns">
+            <button class="btn-batch btn-batch-download" id="btnBatchDownloadRemote" onclick="downloadSelectedRemoteItems()" title="Download all selected files/folders to Local Directory">
+              <i class="fa-solid fa-cloud-arrow-down"></i> Download Selected (<span id="remoteBatchDownloadNum">0</span>)
+            </button>
+            <button class="btn-batch btn-batch-delete" onclick="deleteSelectedItems('remote')" title="Delete selected remote files">
+              <i class="fa-solid fa-trash-can"></i> Delete Selected
+            </button>
+            <button class="btn-batch btn-batch-clear" onclick="clearSelection('remote')" title="Clear selection (Esc)">
+              <i class="fa-solid fa-xmark"></i> Clear
+            </button>
           </div>
         </div>
 
@@ -248,10 +325,13 @@
         </div>
 
         <!-- Remote Files Table -->
-        <div class="table-container">
-          <table class="explorer-table">
+        <div class="table-container" id="remoteTableContainer">
+          <table class="explorer-table" id="remoteTable">
             <thead>
               <tr>
+                <th class="col-checkbox">
+                  <input type="checkbox" id="remoteSelectAll" onchange="toggleSelectAll('remote', this.checked)" title="Select All (Ctrl/Cmd+A)" disabled>
+                </th>
                 <th class="col-icon"></th>
                 <th class="col-name" id="remoteHeaderName" onclick="sortFiles('remote', 'name')">Name <i class="fa-solid fa-sort sort-indicator"></i></th>
                 <th class="col-size" id="remoteHeaderSize" onclick="sortFiles('remote', 'size')">Size <i class="fa-solid fa-sort sort-indicator"></i></th>
@@ -262,7 +342,7 @@
             </thead>
             <tbody id="remoteFileBody">
               <tr>
-                <td colspan="6" class="empty-state">
+                <td colspan="7" class="empty-state">
                   <div class="empty-illustration">
                     <i class="fa-solid fa-tower-broadcast"></i>
                     <p>Enter connection parameters above and click <strong>Connect</strong> to explore remote files.</p>
@@ -367,6 +447,11 @@
         <div class="terminal-view" id="terminalViewContainer">
           <!-- Terminal Toolbar: Quick Commands & Font Size & Detach Controls -->
           <div class="terminal-presets">
+            <div class="terminal-os-indicator" id="dockedOsIndicator" title="Remote System Info">
+              <i class="fa-brands fa-linux" id="dockedOsIcon"></i>
+              <span class="docked-os-text" id="dockedOsText">SSH</span>
+              <span class="docked-dims-badge" id="dockedTermDimsBadge">80&times;24</span>
+            </div>
             <span class="preset-label">Quick:</span>
             <button class="chip" onclick="execQuickCommand('uname -a')">uname -a</button>
             <button class="chip" onclick="execQuickCommand('uptime')">uptime</button>
@@ -407,22 +492,41 @@
     </footer>
   </div>
 
-  <!-- Detachable Floating SSH Terminal Window -->
+  <!-- Detachable Floating macOS-Style SSH Terminal Window -->
   <div class="floating-terminal-window" id="floatingTerminalWindow">
-    <div class="floating-term-header" id="floatingTermHeader">
-      <div class="floating-term-title">
-        <i class="fa-solid fa-terminal text-accent"></i>
-        <span id="floatingTermTitleText">SSH Terminal Window</span>
+    <div class="floating-term-header mac-titlebar" id="floatingTermHeader" ondblclick="maximizeFloatingTerminal()">
+      <!-- macOS Traffic Light Buttons -->
+      <div class="mac-traffic-lights" onclick="event.stopPropagation()">
+        <button class="mac-dot mac-dot-close" onclick="dockTerminal()" title="Close / Dock to panel (Esc)">
+          <span class="mac-dot-symbol">&times;</span>
+        </button>
+        <button class="mac-dot mac-dot-minimize" onclick="minimizeFloatingTerminal()" title="Minimize Window">
+          <span class="mac-dot-symbol">&minus;</span>
+        </button>
+        <button class="mac-dot mac-dot-maximize" onclick="maximizeFloatingTerminal()" id="btnMaxFloat" title="Zoom / Fullscreen">
+          <span class="mac-dot-symbol">&#x2922;</span>
+        </button>
       </div>
-      <div class="floating-term-controls">
-        <div class="term-font-adjuster">
-          <button class="btn-term-font" onclick="adjustTermFontSize(-1)"><i class="fa-solid fa-font"></i>-</button>
+
+      <!-- macOS Centered Window Title & Detection Info -->
+      <div class="mac-term-title-center">
+        <span class="mac-os-badge" id="floatingOsBadge">
+          <i class="fa-brands fa-linux" id="floatingOsIcon"></i>
+        </span>
+        <span class="mac-term-title-text" id="floatingTermTitleText">SSH Terminal — Disconnected</span>
+        <span class="mac-term-dims-badge" id="floatingTermDimsBadge">80&times;24</span>
+      </div>
+
+      <!-- Terminal Toolbar Controls -->
+      <div class="floating-term-controls" onclick="event.stopPropagation()">
+        <div class="term-font-adjuster" title="Terminal Font Size">
+          <button class="btn-term-font" onclick="adjustTermFontSize(-1)" title="Decrease font size"><i class="fa-solid fa-font"></i>-</button>
           <span class="term-font-val" id="floatingFontDisplay">12px</span>
-          <button class="btn-term-font" onclick="adjustTermFontSize(1)"><i class="fa-solid fa-font"></i>+</button>
+          <button class="btn-term-font" onclick="adjustTermFontSize(1)" title="Increase font size"><i class="fa-solid fa-font"></i>+</button>
         </div>
-        <button class="btn-float-ctrl" onclick="minimizeFloatingTerminal()" title="Minimize"><i class="fa-solid fa-minus"></i></button>
-        <button class="btn-float-ctrl" onclick="maximizeFloatingTerminal()" title="Maximize / Restore" id="btnMaxFloat"><i class="fa-solid fa-expand"></i></button>
-        <button class="btn-float-ctrl btn-dock-back" onclick="dockTerminal()" title="Dock Back into Bottom Panel"><i class="fa-solid fa-down-left-and-up-right-to-center"></i> Dock</button>
+        <button class="btn-float-ctrl btn-dock-back" onclick="dockTerminal()" title="Dock Back into Bottom Panel">
+          <i class="fa-solid fa-down-left-and-up-right-to-center"></i> Dock
+        </button>
       </div>
     </div>
     <div class="floating-term-body" id="floatingTermBody">
@@ -431,21 +535,44 @@
     <div class="floating-term-resizer" id="floatingTermResizer"></div>
   </div>
 
-  <!-- In-App File Viewer & Preview Modal -->
-  <div class="modal-overlay" id="fileViewerModal">
-    <div class="modal-card file-viewer-card">
-      <div class="modal-header">
+  <!-- In-App Interactive File Viewer & Preview Modal -->
+  <div class="modal-overlay" id="fileViewerModal" tabindex="-1">
+    <div class="modal-card file-viewer-card" id="fileViewerCard">
+      <div class="modal-header viewer-modal-header">
         <div class="modal-title">
           <i class="fa-regular fa-file-lines text-accent" id="viewerIcon"></i>
-          <div>
+          <div class="viewer-title-box">
             <h3 id="viewerFileName">file_preview.txt</h3>
             <span class="viewer-meta-subtitle" id="viewerMetaSubtitle">Local File • 12 KB • Modified Today</span>
           </div>
         </div>
         <div class="viewer-header-actions">
-          <button class="btn-mini btn-viewer-action" onclick="copyViewerContent()" id="btnCopyViewer" title="Copy Content"><i class="fa-regular fa-copy"></i> Copy</button>
+          <!-- Prev / Next file navigation in active directory -->
+          <div class="viewer-nav-group" title="Navigate between files in folder">
+            <button class="btn-mini btn-viewer-nav" onclick="previewAdjacentFile(-1)" id="btnViewerPrev" title="Previous file (Left Arrow)"><i class="fa-solid fa-chevron-left"></i></button>
+            <span class="viewer-nav-index" id="viewerNavIndex">1/1</span>
+            <button class="btn-mini btn-viewer-nav" onclick="previewAdjacentFile(1)" id="btnViewerNext" title="Next file (Right Arrow)"><i class="fa-solid fa-chevron-right"></i></button>
+          </div>
+
+          <!-- Image Zoom Controls (visible for images) -->
+          <div class="viewer-zoom-controls" id="viewerZoomControls" style="display: none;">
+            <button class="btn-mini btn-viewer-tool" onclick="adjustViewerZoom(-0.25)" title="Zoom Out (-)"><i class="fa-solid fa-magnifying-glass-minus"></i></button>
+            <span class="viewer-zoom-val" id="viewerZoomVal" onclick="resetViewerZoom()" title="Click to reset zoom (100%)">100%</span>
+            <button class="btn-mini btn-viewer-tool" onclick="adjustViewerZoom(0.25)" title="Zoom In (+)"><i class="fa-solid fa-magnifying-glass-plus"></i></button>
+            <button class="btn-mini btn-viewer-tool" onclick="resetViewerZoom()" title="Fit to Screen / Reset"><i class="fa-solid fa-arrows-rotate"></i></button>
+          </div>
+
+          <!-- Text/Code Controls (visible for text files) -->
+          <div class="viewer-text-controls" id="viewerTextControls">
+            <button class="btn-mini btn-viewer-tool" onclick="toggleViewerLineNumbers()" id="btnViewerLineNums" title="Toggle Line Numbers"><i class="fa-solid fa-list-ol"></i> Lines</button>
+            <button class="btn-mini btn-viewer-tool" onclick="toggleViewerWordWrap()" id="btnViewerWrap" title="Toggle Word Wrap"><i class="fa-solid fa-arrow-turn-down"></i> Wrap</button>
+          </div>
+
+          <!-- Standard Actions -->
+          <button class="btn-mini btn-viewer-action" onclick="copyViewerContent()" id="btnCopyViewer" title="Copy Content (Ctrl/Cmd+C)"><i class="fa-regular fa-copy"></i> <span id="copyViewerBtnText">Copy</span></button>
           <button class="btn-mini btn-viewer-action" onclick="downloadViewerFile()" id="btnDownloadViewer" title="Download File"><i class="fa-solid fa-download"></i> Download</button>
-          <button class="btn-close-modal" onclick="closeFileViewer()"><i class="fa-solid fa-xmark"></i></button>
+          <button class="btn-mini btn-viewer-action" onclick="toggleViewerFullscreen()" id="btnViewerFullscreen" title="Toggle Fullscreen (F)"><i class="fa-solid fa-expand"></i></button>
+          <button class="btn-close-modal" onclick="closeFileViewer()" title="Close Viewer (Esc)"><i class="fa-solid fa-xmark"></i></button>
         </div>
       </div>
 
@@ -458,9 +585,16 @@
         </div>
       </div>
 
-      <div class="modal-footer">
-        <span class="viewer-footer-path" id="viewerFooterPath">/path/to/file</span>
-        <button class="btn btn-primary" onclick="closeFileViewer()">Close</button>
+      <div class="modal-footer viewer-modal-footer">
+        <div class="viewer-footer-left">
+          <span class="viewer-type-pill" id="viewerTypePill">TEXT</span>
+          <span class="viewer-stats-pill" id="viewerStatsPill">0 lines • 0 chars</span>
+          <span class="viewer-footer-path" id="viewerFooterPath" title="Click to copy path" onclick="copyViewerPath()">/path/to/file</span>
+        </div>
+        <div class="viewer-footer-right">
+          <button class="btn btn-secondary btn-sm" onclick="copyViewerPath()"><i class="fa-regular fa-copy"></i> Copy Path</button>
+          <button class="btn btn-primary btn-sm" onclick="closeFileViewer()">Close (Esc)</button>
+        </div>
       </div>
     </div>
   </div>

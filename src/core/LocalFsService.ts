@@ -4,9 +4,43 @@ import * as os from 'os';
 import { FileItem, FileType } from '../types';
 
 export class LocalFsService {
+  public getUserHomeDir(): string {
+    return os.homedir().replace(/\\/g, '/');
+  }
+
+  public getDownloadsDir(): string {
+    const home = os.homedir();
+    const downloads = path.join(home, 'Downloads').replace(/\\/g, '/');
+    try {
+      if (fs.existsSync(downloads)) {
+        return downloads;
+      }
+    } catch (_) {}
+    return home.replace(/\\/g, '/');
+  }
+
   public getHomeDir(): string {
-    const home = os.homedir().replace(/\\/g, '/');
-    return home;
+    return this.getDownloadsDir();
+  }
+
+  public getCommonDirectories(): { name: string; path: string; icon: string }[] {
+    const home = os.homedir();
+    const candidateDirs = [
+      { name: 'Downloads', path: path.join(home, 'Downloads'), icon: 'fa-download' },
+      { name: 'Desktop', path: path.join(home, 'Desktop'), icon: 'fa-desktop' },
+      { name: 'Documents', path: path.join(home, 'Documents'), icon: 'fa-folder-open' },
+      { name: 'Pictures', path: path.join(home, 'Pictures'), icon: 'fa-image' },
+      { name: 'Home', path: home, icon: 'fa-house' },
+    ];
+    return candidateDirs
+      .filter(d => {
+        try {
+          return fs.existsSync(d.path);
+        } catch (_) {
+          return false;
+        }
+      })
+      .map(d => ({ ...d, path: d.path.replace(/\\/g, '/') }));
   }
 
   private normalizePath(p: string): string {
@@ -54,7 +88,10 @@ export class LocalFsService {
     const items: FileItem[] = [];
 
     for (const entry of entries) {
-      const fullPath = cleanPath.endsWith('/')
+      if (!entry || entry.name === '.' || entry.name === '..') continue;
+      const fullPath = cleanPath === '/'
+        ? `/${entry.name}`
+        : cleanPath.endsWith('/')
         ? `${cleanPath}${entry.name}`
         : `${cleanPath}/${entry.name}`;
       let type: FileType = 'file';
@@ -67,7 +104,10 @@ export class LocalFsService {
         mtime = stats.mtime;
         if (entry.isDirectory()) type = 'directory';
         else if (entry.isSymbolicLink()) type = 'symlink';
-      } catch (_) {}
+      } catch (_) {
+        if (entry.isDirectory()) type = 'directory';
+        else if (entry.isSymbolicLink()) type = 'symlink';
+      }
 
       items.push({
         name: entry.name,

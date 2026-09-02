@@ -58,7 +58,10 @@ export class SftpClientService {
    */
   public async listDir(remotePath: string): Promise<FileItem[]> {
     const sftp = await this.getSftp();
-    const cleanPath = remotePath || '.';
+    let cleanPath = remotePath || '.';
+    if (cleanPath !== '.') {
+      cleanPath = path.posix.normalize(cleanPath);
+    }
 
     return new Promise((resolve, reject) => {
       sftp.readdir(cleanPath, (err, list) => {
@@ -66,8 +69,14 @@ export class SftpClientService {
           return reject(new Error(`Failed to list directory '${cleanPath}': ${err.message}`));
         }
 
-        const items: FileItem[] = list.map((entry) => {
-          const itemPath = path.posix.join(cleanPath, entry.filename);
+        const validEntries = (list || []).filter(
+          (entry) => entry && entry.filename !== '.' && entry.filename !== '..'
+        );
+
+        const items: FileItem[] = validEntries.map((entry) => {
+          const itemPath = cleanPath === '/' 
+            ? `/${entry.filename}` 
+            : path.posix.join(cleanPath, entry.filename);
           const type = this.getFileType(entry.attrs.mode);
           return {
             name: entry.filename,

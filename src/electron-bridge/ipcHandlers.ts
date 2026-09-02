@@ -93,6 +93,10 @@ export class SftpAppController {
       return this.localFsService.getHomeDir();
     });
 
+    ipcMain.handle('sftp:get-local-places', () => {
+      return this.localFsService.getCommonDirectories();
+    });
+
     ipcMain.handle('sftp:mkdir-local', async (_event: any, localPath: string) => {
       await this.localFsService.mkdir(localPath);
       return { success: true };
@@ -105,6 +109,44 @@ export class SftpAppController {
         await this.localFsService.deleteFile(localPath);
       }
       return { success: true };
+    });
+
+    ipcMain.handle('sftp:get-remote-home', async () => {
+      let remoteHome = '/';
+      try {
+        remoteHome = await this.sftpService.realpath('.');
+      } catch (_) {}
+      return remoteHome || '/';
+    });
+
+    ipcMain.handle('sftp:delete-batch-remote', async (_event: any, items: { remotePath: string; isDirectory: boolean }[]) => {
+      let deleted = 0;
+      for (const item of items) {
+        try {
+          if (item.isDirectory) {
+            await this.sftpService.rmdir(item.remotePath, true);
+          } else {
+            await this.sftpService.deleteFile(item.remotePath);
+          }
+          deleted++;
+        } catch (_) {}
+      }
+      return { success: true, count: deleted };
+    });
+
+    ipcMain.handle('sftp:delete-batch-local', async (_event: any, items: { localPath: string; isDirectory: boolean }[]) => {
+      let deleted = 0;
+      for (const item of items) {
+        try {
+          if (item.isDirectory) {
+            await this.localFsService.rmdir(item.localPath, true);
+          } else {
+            await this.localFsService.deleteFile(item.localPath);
+          }
+          deleted++;
+        } catch (_) {}
+      }
+      return { success: true, count: deleted };
     });
 
     // Transfer Queue APIs
@@ -121,6 +163,36 @@ export class SftpAppController {
     ipcMain.handle('sftp:enqueue-dir-download', async (_event: any, remoteDir: string, localDir: string) => {
       const tasks = await this.transferManager.enqueueDirectoryDownload(remoteDir, localDir);
       return tasks;
+    });
+
+    ipcMain.handle('sftp:enqueue-batch-download', async (_event: any, items: { remotePath: string; localPath: string; isDirectory: boolean }[]) => {
+      for (const item of items) {
+        if (item.isDirectory) {
+          await this.transferManager.enqueueDirectoryDownload(item.remotePath, require('path').dirname(item.localPath));
+        } else {
+          this.transferManager.enqueue({
+            localPath: item.localPath,
+            remotePath: item.remotePath,
+            direction: 'download',
+          });
+        }
+      }
+      return { success: true };
+    });
+
+    ipcMain.handle('sftp:enqueue-batch-upload', async (_event: any, items: { localPath: string; remotePath: string; isDirectory: boolean }[]) => {
+      for (const item of items) {
+        if (item.isDirectory) {
+          await this.transferManager.enqueueDirectoryUpload(item.localPath, require('path').posix.dirname(item.remotePath));
+        } else {
+          this.transferManager.enqueue({
+            localPath: item.localPath,
+            remotePath: item.remotePath,
+            direction: 'upload',
+          });
+        }
+      }
+      return { success: true };
     });
 
     ipcMain.handle('sftp:cancel-transfer', (_event: any, taskId: string) => {

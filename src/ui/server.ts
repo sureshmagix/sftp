@@ -220,6 +220,12 @@ export class SftpWebServer {
       res.json({ path: home });
     });
 
+    // Local FS: Quick Access / Common Places
+    this.app.get('/api/local-places', (_req: Request, res: Response) => {
+      const places = this.controller.localFsService.getCommonDirectories();
+      res.json({ places });
+    });
+
     // Local FS: List directory
     this.app.get('/api/list-local', async (req: Request, res: Response) => {
       let targetPath = (req.query.path as string) || this.controller.localFsService.getHomeDir();
@@ -365,6 +371,19 @@ export class SftpWebServer {
       }
     });
 
+    // Remote SFTP: Get user home directory
+    this.app.get('/api/remote-home', async (_req: Request, res: Response) => {
+      try {
+        let remoteHome = '/';
+        try {
+          remoteHome = await this.controller.sftpService.realpath('.');
+        } catch (_) {}
+        res.json({ path: remoteHome || '/' });
+      } catch (err: any) {
+        res.json({ path: '/' });
+      }
+    });
+
     // Remote SFTP: Delete
     this.app.post('/api/delete-remote', async (req: Request, res: Response) => {
       const { remotePath, isDirectory } = req.body;
@@ -378,6 +397,53 @@ export class SftpWebServer {
       } catch (err: any) {
         res.status(500).json({ success: false, error: err.message });
       }
+    });
+
+    // Remote SFTP: Batch Delete
+    this.app.post('/api/delete-batch-remote', async (req: Request, res: Response) => {
+      const { items } = req.body; // Array of { remotePath: string, isDirectory: boolean }
+      if (!Array.isArray(items) || items.length === 0) {
+        return res.status(400).json({ success: false, error: 'No items provided' });
+      }
+      let deletedCount = 0;
+      const errors: string[] = [];
+      for (const item of items) {
+        try {
+          if (item.isDirectory) {
+            await this.controller.sftpService.rmdir(item.remotePath, true);
+          } else {
+            await this.controller.sftpService.deleteFile(item.remotePath);
+          }
+          deletedCount++;
+        } catch (err: any) {
+          errors.push(`${path.posix.basename(item.remotePath)}: ${err.message}`);
+        }
+      }
+      res.json({ success: true, count: deletedCount, errors: errors.length > 0 ? errors : undefined });
+    });
+
+    // Local FS: Batch Delete
+    this.app.post('/api/delete-batch-local', async (req: Request, res: Response) => {
+      const { items } = req.body; // Array of { localPath: string, isDirectory: boolean }
+      if (!Array.isArray(items) || items.length === 0) {
+        return res.status(400).json({ success: false, error: 'No items provided' });
+      }
+      let deletedCount = 0;
+      const errors: string[] = [];
+      for (const item of items) {
+        try {
+          const p = (item.localPath || '').replace(/\\/g, '/');
+          if (item.isDirectory) {
+            await this.controller.localFsService.rmdir(p, true);
+          } else {
+            await this.controller.localFsService.deleteFile(p);
+          }
+          deletedCount++;
+        } catch (err: any) {
+          errors.push(`${path.basename(item.localPath)}: ${err.message}`);
+        }
+      }
+      res.json({ success: true, count: deletedCount, errors: errors.length > 0 ? errors : undefined });
     });
 
     // Remote SFTP: Rename
@@ -436,6 +502,77 @@ export class SftpWebServer {
       }
     });
 
+    // Transfer Queue: Batch Download Multiple Files / Folders
+    this.app.post('/api/enqueue-batch-download', async (req: Request, res: Response) => {
+      const { items, localDir } = req.body; // items: Array<{ remotePath: string, name: string, isDirectory: boolean }>
+      if (!Array.isArray(items) || items.length === 0) {
+        return res.status(400).json({ success: false, error: 'No items provided for download' });
+      }
+      try {
+        const targetLocalDir = (localDir || this.controller.localFsService.getHomeDir()).replace(/\\/g, '/');
+        let totalTasks = 0;
+
+        for (const item of items) {
+          if (item.isDirectory) {
+            const tasks = await this.controller.transferManager.enqueueDirectoryDownload(item.remotePath, targetLocalDir);
+            totalTasks += tasks.length;
+          } else {
+            const fileName = path.posix.basename(item.remotePath);
+            const targetLocalPath = targetLocalDir.endsWith('/')
+              ? `${targetLocalDir}${fileName}`
+              : `${targetLocalDir}/${fileName}`;
+            this.controller.transferManager.enqueue({
+              localPath: targetLocalPath,
+              remotePath: item.remotePath,
+              direction: 'download',
+            });
+            totalTasks++;
+          }
+        }
+
+        res.json({ success: true, count: totalTasks });
+      } catch (err: any) {
+        res.status(500).json({ success: false, error: err.message });
+      }
+    });
+
+    // Transfer Queue: Batch Upload Multiple Files / Folders
+    this.app.post('/api/enqueue-batch-upload', async (req: Request, res: Response) => {
+      const { items, remoteDir } = req.body; // items: Array<{ localPath: string, name: string, isDirectory: boolean }>
+      if (!Array.isArray(items) || items.length === 0) {
+        return res.status(400).json({ success: false, error: 'No items provided for upload' });
+      }
+      try {
+        const targetRemoteDir = remoteDir || '.';
+        let totalTasks = 0;
+
+        for (const item of items) {
+          const lPath = (item.localPath || '').replace(/\\/g, '/');
+          if (item.isDirectory) {
+            const tasks = await this.controller.transferManager.enqueueDirectoryUpload(lPath, targetRemoteDir);
+            totalTasks += tasks.length;
+          } else {
+            const fileName = path.basename(lPath);
+            const targetRemotePath = targetRemoteDir === '.'
+              ? fileName
+              : targetRemoteDir.endsWith('/')
+              ? `${targetRemoteDir}${fileName}`
+              : `${targetRemoteDir}/${fileName}`;
+            this.controller.transferManager.enqueue({
+              localPath: lPath,
+              remotePath: targetRemotePath,
+              direction: 'upload',
+            });
+            totalTasks++;
+          }
+        }
+
+        res.json({ success: true, count: totalTasks });
+      } catch (err: any) {
+        res.status(500).json({ success: false, error: err.message });
+      }
+    });
+
     // Transfer Queue: Clear Completed / Failed Transfers
     this.app.post('/api/clear-completed-transfers', (_req: Request, res: Response) => {
       this.controller.transferManager.clearCompleted();
@@ -484,30 +621,56 @@ export class SftpWebServer {
   }
 
   private configureWebSocket() {
+    let progressTimer: NodeJS.Timeout | null = null;
+    let pendingProgress = false;
+
     const broadcast = (msgObj: any) => {
-      const message = JSON.stringify(msgObj);
-      this.wss.clients.forEach((client: WebSocket) => {
-        if (client.readyState === WebSocket.OPEN) {
-          client.send(message);
+      try {
+        const message = JSON.stringify(msgObj);
+        this.wss.clients.forEach((client: WebSocket) => {
+          if (client.readyState === WebSocket.OPEN) {
+            client.send(message);
+          }
+        });
+      } catch (err) {
+        console.error('Error broadcasting WS message:', err);
+      }
+    };
+
+    const broadcastProgressThrottled = () => {
+      if (progressTimer) {
+        pendingProgress = true;
+        return;
+      }
+      const tasks = this.controller.transferManager.getTasks();
+      broadcast({ type: 'transfer-progress', transfers: tasks });
+
+      progressTimer = setTimeout(() => {
+        progressTimer = null;
+        if (pendingProgress) {
+          pendingProgress = false;
+          broadcastProgressThrottled();
         }
-      });
+      }, 150);
     };
 
     this.controller.transferManager.on('progress', () => {
-      const tasks = this.controller.transferManager.getTasks();
-      broadcast({ type: 'transfer-progress', transfers: tasks });
+      broadcastProgressThrottled();
     });
 
     this.controller.transferManager.on('task-completed', (task) => {
       broadcast({ type: 'task-completed', task });
+      broadcastProgressThrottled();
     });
 
     this.controller.transferManager.on('task-failed', (task) => {
       broadcast({ type: 'task-failed', task });
+      broadcastProgressThrottled();
     });
 
     this.controller.transferManager.on('queue-empty', () => {
       broadcast({ type: 'queue-empty' });
+      broadcastProgressThrottled();
     });
   }
 

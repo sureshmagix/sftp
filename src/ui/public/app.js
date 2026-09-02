@@ -1,6 +1,8 @@
 // Global Application State
 let currentLocalPath = '';
 let currentRemotePath = '.';
+let localHomePath = '';
+let remoteHomePath = '/';
 let localFilesCache = [];
 let remoteFilesCache = [];
 let isConnected = false;
@@ -9,6 +11,19 @@ let currentServerPort = 3000;
 let primaryServerIp = '127.0.0.1';
 let commandHistory = [];
 let historyIndex = -1;
+
+// Multi-Selection & Active Panel State
+let selectedLocalPaths = new Set();
+let selectedRemotePaths = new Set();
+let focusedLocalIndex = -1;
+let focusedRemoteIndex = -1;
+let lastSelectedLocalIndex = -1;
+let lastSelectedRemoteIndex = -1;
+let activePanel = 'local'; // 'local' | 'remote'
+
+// Directory Navigation History Stacks
+let localHistory = { stack: [], index: -1 };
+let remoteHistory = { stack: [], index: -1 };
 
 // Default Sort: Last Modified Date descending (newest on top)
 let sortState = {
@@ -23,6 +38,16 @@ let activeTransfersCache = [];
 let recentlyTransferredPaths = new Set();
 let isLocalRecentFilterActive = false;
 let isRemoteRecentFilterActive = false;
+let wasTransferring = false;
+let lastTransferCompleteToastTime = 0;
+
+function notifyAllTransfersCompleted() {
+  const now = Date.now();
+  if (now - lastTransferCompleteToastTime > 1500) {
+    lastTransferCompleteToastTime = now;
+    showToast('success', '🎉 All files transferred successfully!');
+  }
+}
 
 // Themes & Font State
 let currentTheme = localStorage.getItem('sftp_theme') || 'theme-midnight';
@@ -122,14 +147,32 @@ document.addEventListener('DOMContentLoaded', () => {
   initWebSocket();
   initAutoRefresh();
   initClientProfiles();
+  initKeyboardNavigation();
+  initTableEventDelegation();
   updateSortHeaderIndicators('local');
   updateSortHeaderIndicators('remote');
   fetchInitialLocalDir();
+  loadLocalCommonPlaces();
   checkConnectionStatus();
   setInterval(fetchTransfers, 1000);
   setupTerminalHistory();
   initDragAndDrop();
   initFloatingWindowDrag();
+  window.addEventListener('resize', updateTerminalDimensions);
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && isTerminalDetached) {
+      dockTerminal();
+    }
+  });
+  document.addEventListener('click', (e) => {
+    const popover = document.getElementById('localQuickAccessPopover');
+    const btn = document.getElementById('btnLocalQuickAccess');
+    if (popover && popover.style.display !== 'none') {
+      if (!popover.contains(e.target) && !btn.contains(e.target)) {
+        closeQuickAccessPopover();
+      }
+    }
+  });
 });
 
 // -------------------------------------------------------------
@@ -262,6 +305,8 @@ function setTermFontSize(size, showNotification = true) {
   document.querySelectorAll('.term-chip').forEach(chip => {
     chip.classList.toggle('active', parseInt(chip.getAttribute('data-tsize'), 10) === currentTermFontSize);
   });
+
+  updateTerminalDimensions();
 
   if (showNotification) {
     showToast('info', `Terminal font: ${currentTermFontSize}px`);
@@ -915,7 +960,7 @@ function updateSortHeadersUI(panelType) {
   });
 }
 
-function applyLocalFileFilter() {
+function getFilteredLocalFiles() {
   const searchInput = document.getElementById('localSearchInput');
   const query = searchInput ? searchInput.value.trim().toLowerCase() : '';
   let filtered = [...localFilesCache];
@@ -931,11 +976,10 @@ function applyLocalFileFilter() {
     });
   }
 
-  filtered = applySortToFiles(filtered, sortState.local);
-  renderLocalFiles(filtered);
+  return applySortToFiles(filtered, sortState.local);
 }
 
-function applyRemoteFileFilter() {
+function getFilteredRemoteFiles() {
   const searchInput = document.getElementById('remoteSearchInput');
   const query = searchInput ? searchInput.value.trim().toLowerCase() : '';
   let filtered = [...remoteFilesCache];
@@ -951,8 +995,25 @@ function applyRemoteFileFilter() {
     });
   }
 
-  filtered = applySortToFiles(filtered, sortState.remote);
+  return applySortToFiles(filtered, sortState.remote);
+}
+
+function getVisibleFiles(panel) {
+  return panel === 'local' ? getFilteredLocalFiles() : getFilteredRemoteFiles();
+}
+
+function applyLocalFileFilter() {
+  const filtered = getFilteredLocalFiles();
+  renderLocalFiles(filtered);
+}
+
+function applyRemoteFileFilter() {
+  const filtered = getFilteredRemoteFiles();
   renderRemoteFiles(filtered);
+}
+
+function sortFiles(panelType, key) {
+  handleSortClick(panelType, key);
 }
 
 // -------------------------------------------------------------
@@ -982,6 +1043,10 @@ function initWebSocket() {
           showToast('error', `Failed: ${task.fileName} - ${task.error || 'Unknown error'}`);
         }
       } else if (data.type === 'queue-empty') {
+        if (wasTransferring) {
+          wasTransferring = false;
+          notifyAllTransfersCompleted();
+        }
         silentSyncAll();
       }
     } catch (e) {
@@ -1027,6 +1092,12 @@ function updateConnectionUI(status) {
 
   statusDot.className = `status-dot ${status}`;
 
+  const btnRemoteBack = document.getElementById('btnRemoteBack');
+  const btnRemoteForward = document.getElementById('btnRemoteForward');
+  const btnRemoteHome = document.getElementById('btnRemoteHome');
+  const remoteSelectAll = document.getElementById('remoteSelectAll');
+  const btnBatchUploadLocal = document.getElementById('btnBatchUploadLocal');
+
   if (status === 'connected') {
     statusText.innerText = 'Connected';
     btnConnect.disabled = true;
@@ -1035,6 +1106,9 @@ function updateConnectionUI(status) {
     btnRemoteUp.disabled = false;
     btnRemoteRefresh.disabled = false;
     btnRemoteMkdir.disabled = false;
+    if (btnRemoteHome) btnRemoteHome.disabled = false;
+    if (remoteSelectAll) remoteSelectAll.disabled = false;
+    if (btnBatchUploadLocal) btnBatchUploadLocal.disabled = false;
     if (btnRemoteRecent) btnRemoteRecent.disabled = false;
     if (btnRemoteUploadFolder) btnRemoteUploadFolder.disabled = false;
     if (btnRemoteUploadFiles) btnRemoteUploadFiles.disabled = false;
@@ -1045,10 +1119,13 @@ function updateConnectionUI(status) {
     const hostVal = document.getElementById('sshHost').value.trim();
     const userVal = document.getElementById('sshUser').value.trim();
     remoteHostLabel.innerText = `${userVal}@${hostVal}`;
-    if (floatingTermTitleText) floatingTermTitleText.innerText = `SSH Terminal: ${userVal}@${hostVal}`;
+    if (floatingTermTitleText) floatingTermTitleText.innerText = `${userVal}@${hostVal}: ~ (bash)`;
     if (termPromptLabel) termPromptLabel.innerText = `${userVal}@${hostVal}:~$`;
     fetchRemoteFiles(currentRemotePath);
     renderLocalFiles(localFilesCache);
+    updateHistoryButtons();
+    setTimeout(detectRemoteEnvironment, 300);
+    setTimeout(updateTerminalDimensions, 100);
   } else if (status === 'connecting') {
     statusText.innerText = 'Connecting...';
     btnConnect.disabled = true;
@@ -1057,6 +1134,7 @@ function updateConnectionUI(status) {
     if (btnRemoteUploadFolder) btnRemoteUploadFolder.disabled = true;
     if (btnRemoteUploadFiles) btnRemoteUploadFiles.disabled = true;
     if (btnUploadCurrentFolder) btnUploadCurrentFolder.disabled = true;
+    if (btnBatchUploadLocal) btnBatchUploadLocal.disabled = true;
   } else if (status === 'error') {
     statusText.innerText = 'Error';
     btnConnect.disabled = false;
@@ -1065,6 +1143,7 @@ function updateConnectionUI(status) {
     if (btnRemoteUploadFolder) btnRemoteUploadFolder.disabled = true;
     if (btnRemoteUploadFiles) btnRemoteUploadFiles.disabled = true;
     if (btnUploadCurrentFolder) btnUploadCurrentFolder.disabled = true;
+    if (btnBatchUploadLocal) btnBatchUploadLocal.disabled = true;
   } else {
     statusText.innerText = 'Disconnected';
     btnConnect.disabled = false;
@@ -1073,6 +1152,11 @@ function updateConnectionUI(status) {
     btnRemoteUp.disabled = true;
     btnRemoteRefresh.disabled = true;
     btnRemoteMkdir.disabled = true;
+    if (btnRemoteBack) btnRemoteBack.disabled = true;
+    if (btnRemoteForward) btnRemoteForward.disabled = true;
+    if (btnRemoteHome) btnRemoteHome.disabled = true;
+    if (remoteSelectAll) remoteSelectAll.disabled = true;
+    if (btnBatchUploadLocal) btnBatchUploadLocal.disabled = true;
     if (btnRemoteRecent) btnRemoteRecent.disabled = true;
     if (btnRemoteUploadFolder) btnRemoteUploadFolder.disabled = true;
     if (btnRemoteUploadFiles) btnRemoteUploadFiles.disabled = true;
@@ -1080,8 +1164,20 @@ function updateConnectionUI(status) {
     termInput.disabled = true;
     btnExec.disabled = true;
     remoteHostLabel.innerText = 'Remote Host / SFTP Server';
-    if (floatingTermTitleText) floatingTermTitleText.innerText = 'SSH Terminal (Disconnected)';
+    if (floatingTermTitleText) floatingTermTitleText.innerText = 'SSH Terminal — Disconnected';
     if (termPromptLabel) termPromptLabel.innerText = 'user@remote:~$';
+
+    const dockedOsText = document.getElementById('dockedOsText');
+    if (dockedOsText) dockedOsText.innerText = 'SSH';
+    const floatingOsIcon = document.getElementById('floatingOsIcon');
+    const dockedOsIcon = document.getElementById('dockedOsIcon');
+    if (floatingOsIcon) floatingOsIcon.className = 'fa-solid fa-terminal';
+    if (dockedOsIcon) dockedOsIcon.className = 'fa-solid fa-terminal';
+
+    selectedRemotePaths.clear();
+    remoteHistory = { stack: [], index: -1 };
+    updateSelectionUI('remote');
+    updateHistoryButtons();
 
     document.getElementById('remoteFileBody').innerHTML = `
       <tr>
@@ -1095,6 +1191,7 @@ function updateConnectionUI(status) {
     `;
     renderBreadcrumbs('remote', '/');
     renderLocalFiles(localFilesCache);
+    updateTerminalDimensions();
   }
 }
 
@@ -1198,34 +1295,756 @@ async function handleDisconnect() {
 }
 
 // -------------------------------------------------------------
-// 6. Local Filesystem Explorer & File Actions
+// 6. Keyboard Navigation & Selection Engine
+// -------------------------------------------------------------
+function initKeyboardNavigation() {
+  window.addEventListener('keydown', handleGlobalKeydown);
+
+  const localPanel = document.getElementById('localExplorerPanel');
+  const remotePanel = document.getElementById('remoteExplorerPanel');
+
+  if (localPanel) {
+    localPanel.addEventListener('focusin', () => setActivePanel('local'));
+    localPanel.addEventListener('click', () => setActivePanel('local'));
+  }
+  if (remotePanel) {
+    remotePanel.addEventListener('focusin', () => setActivePanel('remote'));
+    remotePanel.addEventListener('click', () => setActivePanel('remote'));
+  }
+}
+
+function setActivePanel(panel) {
+  activePanel = panel;
+  const localEl = document.getElementById('localExplorerPanel');
+  const remoteEl = document.getElementById('remoteExplorerPanel');
+  if (localEl) localEl.classList.toggle('panel-focused', panel === 'local');
+  if (remoteEl) remoteEl.classList.toggle('panel-focused', panel === 'remote');
+}
+
+function handleGlobalKeydown(e) {
+  // If user is currently typing in an input, textarea or select
+  const isInput = ['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName);
+  if (isInput) {
+    if (e.key === 'Escape') {
+      e.target.blur();
+    }
+    return;
+  }
+
+  // If any modal dialog is currently open
+  const openModal = document.querySelector('.modal-overlay.open');
+  if (openModal) {
+    if (openModal.id === 'fileViewerModal') {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        closeFileViewer();
+      } else if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+        e.preventDefault();
+        previewAdjacentFile(1);
+      } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        previewAdjacentFile(-1);
+      } else if (e.key === 'f' || e.key === 'F') {
+        e.preventDefault();
+        toggleViewerFullscreen();
+      } else if (e.key === '+' || e.key === '=') {
+        e.preventDefault();
+        adjustViewerZoom(0.25);
+      } else if (e.key === '-' || e.key === '_') {
+        e.preventDefault();
+        adjustViewerZoom(-0.25);
+      } else if (e.key === '0') {
+        e.preventDefault();
+        resetViewerZoom();
+      }
+    } else {
+      if (e.key === 'Escape') {
+        closePreferencesModal();
+        closePortModal();
+        closeClientsModal();
+        closeFileViewer();
+      }
+    }
+    return;
+  }
+
+  // Tab key: switch active explorer panel
+  if (e.key === 'Tab') {
+    e.preventDefault();
+    setActivePanel(activePanel === 'local' ? 'remote' : 'local');
+    return;
+  }
+
+  const panel = activePanel;
+  const files = getVisibleFiles(panel);
+  if (!files || files.length === 0) {
+    if (e.key === 'Backspace' || (e.altKey && e.key === 'ArrowUp')) {
+      e.preventDefault();
+      if (panel === 'local') navigateLocalUp();
+      else navigateRemoteUp();
+    }
+    return;
+  }
+
+  let focusedIndex = panel === 'local' ? focusedLocalIndex : focusedRemoteIndex;
+
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    const newIdx = Math.min(files.length - 1, focusedIndex + 1);
+    if (e.shiftKey) {
+      const anchorIdx = (panel === 'local' ? lastSelectedLocalIndex : lastSelectedRemoteIndex);
+      const start = anchorIdx === -1 ? (focusedIndex === -1 ? 0 : focusedIndex) : anchorIdx;
+      setFocusIndex(panel, newIdx);
+      selectRange(panel, start, newIdx);
+    } else {
+      setFocusIndex(panel, newIdx);
+    }
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    const newIdx = Math.max(0, focusedIndex <= 0 ? 0 : focusedIndex - 1);
+    if (e.shiftKey) {
+      const anchorIdx = (panel === 'local' ? lastSelectedLocalIndex : lastSelectedRemoteIndex);
+      const start = anchorIdx === -1 ? (focusedIndex === -1 ? 0 : focusedIndex) : anchorIdx;
+      setFocusIndex(panel, newIdx);
+      selectRange(panel, start, newIdx);
+    } else {
+      setFocusIndex(panel, newIdx);
+    }
+  } else if (e.key === ' ' || e.code === 'Space') {
+    e.preventDefault();
+    if (focusedIndex >= 0 && focusedIndex < files.length) {
+      const file = files[focusedIndex];
+      const fullPath = panel === 'local' ? joinPath(currentLocalPath, file.name) : joinPath(currentRemotePath, file.name);
+      toggleItemSelection(panel, fullPath, undefined, focusedIndex);
+    }
+  } else if ((e.ctrlKey || e.metaKey) && (e.key === 'a' || e.key === 'A')) {
+    e.preventDefault();
+    toggleSelectAll(panel, true);
+  } else if (e.key === 'Escape') {
+    clearSelection(panel);
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    if (focusedIndex >= 0 && focusedIndex < files.length) {
+      const file = files[focusedIndex];
+      const fullPath = panel === 'local' ? joinPath(currentLocalPath, file.name) : joinPath(currentRemotePath, file.name);
+      if (file.type === 'directory') {
+        if (panel === 'local') navigateLocalPath(fullPath);
+        else navigateRemotePath(fullPath);
+      } else {
+        if (panel === 'local') viewLocalFile(fullPath, file.name);
+        else viewRemoteFile(fullPath, file.name);
+      }
+    }
+  } else if (e.key === 'Backspace' || (e.altKey && e.key === 'ArrowUp')) {
+    e.preventDefault();
+    if (panel === 'local') navigateLocalUp();
+    else navigateRemoteUp();
+  } else if ((e.altKey && e.key === 'ArrowLeft') || ((e.metaKey || e.ctrlKey) && e.key === '[')) {
+    e.preventDefault();
+    if (panel === 'local') navigateLocalHistoryBack();
+    else navigateRemoteHistoryBack();
+  } else if ((e.altKey && e.key === 'ArrowRight') || ((e.metaKey || e.ctrlKey) && e.key === ']')) {
+    e.preventDefault();
+    if (panel === 'local') navigateLocalHistoryForward();
+    else navigateRemoteHistoryForward();
+  } else if (e.key === 'Delete' || ((e.metaKey || e.ctrlKey) && e.key === 'Backspace')) {
+    e.preventDefault();
+    const selSet = panel === 'local' ? selectedLocalPaths : selectedRemotePaths;
+    if (selSet.size > 0) {
+      deleteSelectedItems(panel);
+    } else if (focusedIndex >= 0 && focusedIndex < files.length) {
+      const file = files[focusedIndex];
+      const fullPath = panel === 'local' ? joinPath(currentLocalPath, file.name) : joinPath(currentRemotePath, file.name);
+      if (panel === 'local') deleteLocalItem(fullPath, file.type === 'directory');
+      else deleteRemoteItem(fullPath, file.type === 'directory');
+    }
+  } else if ((e.ctrlKey || e.metaKey) && (e.key === 'f' || e.key === 'F')) {
+    e.preventDefault();
+    const searchInput = document.getElementById(`${panel}SearchInput`);
+    if (searchInput) {
+      searchInput.focus();
+      searchInput.select();
+    }
+  }
+}
+
+// -------------------------------------------------------------
+// 7. Multi-Selection & Batch Operations Management
+// -------------------------------------------------------------
+function setFocusIndex(panel, index) {
+  if (panel === 'local') {
+    focusedLocalIndex = index;
+  } else {
+    focusedRemoteIndex = index;
+  }
+  updateFocusUI(panel);
+}
+
+function updateFocusUI(panel) {
+  const tbody = document.getElementById(`${panel}FileBody`);
+  if (!tbody) return;
+  const rows = tbody.querySelectorAll('tr[data-index]');
+  const focusedIdx = panel === 'local' ? focusedLocalIndex : focusedRemoteIndex;
+
+  rows.forEach(r => {
+    const idx = parseInt(r.getAttribute('data-index'), 10);
+    if (idx === focusedIdx) {
+      r.classList.add('row-focused');
+      r.scrollIntoView({ block: 'nearest' });
+    } else {
+      r.classList.remove('row-focused');
+    }
+  });
+}
+
+function toggleItemSelection(panel, fullPath, forceState, index) {
+  const selSet = panel === 'local' ? selectedLocalPaths : selectedRemotePaths;
+  const isSelected = forceState !== undefined ? forceState : !selSet.has(fullPath);
+
+  if (isSelected) {
+    selSet.add(fullPath);
+  } else {
+    selSet.delete(fullPath);
+  }
+
+  if (index !== undefined) {
+    if (panel === 'local') lastSelectedLocalIndex = index;
+    else lastSelectedRemoteIndex = index;
+  }
+
+  updateSelectionUI(panel);
+}
+
+function selectRange(panel, startIdx, endIdx) {
+  const files = getVisibleFiles(panel);
+  if (!files || files.length === 0) return;
+  const min = Math.max(0, Math.min(startIdx, endIdx));
+  const max = Math.min(files.length - 1, Math.max(startIdx, endIdx));
+  const selSet = panel === 'local' ? selectedLocalPaths : selectedRemotePaths;
+
+  for (let i = min; i <= max; i++) {
+    const f = files[i];
+    const fullPath = panel === 'local' ? joinPath(currentLocalPath, f.name) : joinPath(currentRemotePath, f.name);
+    selSet.add(fullPath);
+  }
+
+  if (panel === 'local') lastSelectedLocalIndex = startIdx;
+  else lastSelectedRemoteIndex = startIdx;
+
+  updateSelectionUI(panel);
+}
+
+function toggleSelectAll(panel, isChecked) {
+  const files = getVisibleFiles(panel);
+  const selSet = panel === 'local' ? selectedLocalPaths : selectedRemotePaths;
+
+  if (isChecked) {
+    files.forEach((f) => {
+      const fullPath = panel === 'local' ? joinPath(currentLocalPath, f.name) : joinPath(currentRemotePath, f.name);
+      selSet.add(fullPath);
+    });
+    if (panel === 'local') lastSelectedLocalIndex = 0;
+    else lastSelectedRemoteIndex = 0;
+  } else {
+    selSet.clear();
+  }
+
+  updateSelectionUI(panel);
+}
+
+function clearSelection(panel) {
+  if (panel === 'local') {
+    selectedLocalPaths.clear();
+    lastSelectedLocalIndex = -1;
+  } else {
+    selectedRemotePaths.clear();
+    lastSelectedRemoteIndex = -1;
+  }
+  updateSelectionUI(panel);
+}
+
+function updateSelectionUI(panel) {
+  const selSet = panel === 'local' ? selectedLocalPaths : selectedRemotePaths;
+  const tbody = document.getElementById(`${panel}FileBody`);
+  const visibleFiles = getVisibleFiles(panel);
+
+  if (tbody) {
+    const rows = tbody.querySelectorAll('tr[data-path]');
+    rows.forEach(r => {
+      const path = r.getAttribute('data-path');
+      const isSel = selSet.has(path);
+      r.classList.toggle('row-selected', isSel);
+      const chk = r.querySelector('.row-checkbox');
+      if (chk) chk.checked = isSel;
+    });
+  }
+
+  // Update Select All Checkbox in table header
+  const selectAllChk = document.getElementById(`${panel}SelectAll`);
+  if (selectAllChk) {
+    const totalVisible = visibleFiles.length;
+    let selectedVisibleCount = 0;
+    visibleFiles.forEach(f => {
+      const fullPath = panel === 'local' ? joinPath(currentLocalPath, f.name) : joinPath(currentRemotePath, f.name);
+      if (selSet.has(fullPath)) selectedVisibleCount++;
+    });
+
+    if (totalVisible > 0 && selectedVisibleCount === totalVisible) {
+      selectAllChk.checked = true;
+      selectAllChk.indeterminate = false;
+    } else if (selectedVisibleCount > 0) {
+      selectAllChk.checked = false;
+      selectAllChk.indeterminate = true;
+    } else {
+      selectAllChk.checked = false;
+      selectAllChk.indeterminate = false;
+    }
+  }
+
+  // Update Batch Bar
+  const batchBar = document.getElementById(`${panel}BatchBar`);
+  const countBadge = document.getElementById(`${panel}BatchCount`);
+  const sizeBadge = document.getElementById(`${panel}BatchSize`);
+  const uploadNum = document.getElementById('localBatchUploadNum');
+  const downloadNum = document.getElementById('remoteBatchDownloadNum');
+  const btnUpload = document.getElementById('btnBatchUploadLocal');
+
+  const count = selSet.size;
+
+  if (batchBar) {
+    if (count > 0) {
+      batchBar.style.display = 'flex';
+      if (countBadge) countBadge.innerText = `${count} selected`;
+
+      // Calculate total size of non-directory items selected
+      let totalBytes = 0;
+      const fileCache = panel === 'local' ? localFilesCache : remoteFilesCache;
+      fileCache.forEach(f => {
+        const fullPath = panel === 'local' ? joinPath(currentLocalPath, f.name) : joinPath(currentRemotePath, f.name);
+        if (selSet.has(fullPath) && f.type !== 'directory' && f.size) {
+          totalBytes += f.size;
+        }
+      });
+      if (sizeBadge) sizeBadge.innerText = totalBytes > 0 ? `(${formatBytes(totalBytes)})` : '';
+      if (uploadNum) uploadNum.innerText = count;
+      if (downloadNum) downloadNum.innerText = count;
+      if (btnUpload) btnUpload.disabled = !isConnected;
+    } else {
+      batchBar.style.display = 'none';
+    }
+  }
+}
+
+// -------------------------------------------------------------
+// 8. Directory Navigation History Stacks
+// -------------------------------------------------------------
+function pushLocalHistory(path) {
+  const norm = normalizePath(path);
+  if (localHistory.index >= 0 && localHistory.stack[localHistory.index] === norm) {
+    updateHistoryButtons();
+    return;
+  }
+  localHistory.stack = localHistory.stack.slice(0, localHistory.index + 1);
+  localHistory.stack.push(norm);
+  localHistory.index = localHistory.stack.length - 1;
+  updateHistoryButtons();
+}
+
+function pushRemoteHistory(path) {
+  const norm = normalizePath(path);
+  if (remoteHistory.index >= 0 && remoteHistory.stack[remoteHistory.index] === norm) {
+    updateHistoryButtons();
+    return;
+  }
+  remoteHistory.stack = remoteHistory.stack.slice(0, remoteHistory.index + 1);
+  remoteHistory.stack.push(norm);
+  remoteHistory.index = remoteHistory.stack.length - 1;
+  updateHistoryButtons();
+}
+
+function updateHistoryButtons() {
+  const btnLocalBack = document.getElementById('btnLocalBack');
+  const btnLocalForward = document.getElementById('btnLocalForward');
+  const btnRemoteBack = document.getElementById('btnRemoteBack');
+  const btnRemoteForward = document.getElementById('btnRemoteForward');
+  const btnRemoteHome = document.getElementById('btnRemoteHome');
+
+  if (btnLocalBack) btnLocalBack.disabled = localHistory.index <= 0;
+  if (btnLocalForward) btnLocalForward.disabled = localHistory.index >= localHistory.stack.length - 1;
+  if (btnRemoteBack) btnRemoteBack.disabled = !isConnected || remoteHistory.index <= 0;
+  if (btnRemoteForward) btnRemoteForward.disabled = !isConnected || remoteHistory.index >= remoteHistory.stack.length - 1;
+  if (btnRemoteHome) btnRemoteHome.disabled = !isConnected;
+}
+
+function navigateLocalHistoryBack() {
+  if (localHistory.index > 0) {
+    localHistory.index--;
+    navigateLocalPath(localHistory.stack[localHistory.index], false);
+  }
+}
+
+function navigateLocalHistoryForward() {
+  if (localHistory.index < localHistory.stack.length - 1) {
+    localHistory.index++;
+    navigateLocalPath(localHistory.stack[localHistory.index], false);
+  }
+}
+
+function navigateRemoteHistoryBack() {
+  if (!isConnected) return;
+  if (remoteHistory.index > 0) {
+    remoteHistory.index--;
+    navigateRemotePath(remoteHistory.stack[remoteHistory.index], false);
+  }
+}
+
+function navigateRemoteHistoryForward() {
+  if (!isConnected) return;
+  if (remoteHistory.index < remoteHistory.stack.length - 1) {
+    remoteHistory.index++;
+    navigateRemotePath(remoteHistory.stack[remoteHistory.index], false);
+  }
+}
+
+function navigateLocalHome() {
+  navigateLocalPath(localHomePath || '/');
+}
+
+async function navigateRemoteHome() {
+  if (!isConnected) return;
+  try {
+    const res = await fetch('/api/remote-home');
+    const data = await res.json();
+    if (data.path) {
+      remoteHomePath = normalizePath(data.path);
+      navigateRemotePath(remoteHomePath);
+    } else {
+      navigateRemotePath(remoteHomePath || '/');
+    }
+  } catch (_) {
+    navigateRemotePath(remoteHomePath || '/');
+  }
+}
+
+// -------------------------------------------------------------
+// 9. Batch Download / Upload / Delete Operations
+// -------------------------------------------------------------
+async function downloadSelectedRemoteItems() {
+  if (!isConnected) {
+    showToast('error', 'Connect to SSH / SFTP server first!');
+    return;
+  }
+  const selectedPaths = Array.from(selectedRemotePaths);
+  if (selectedPaths.length === 0) {
+    showToast('info', 'No remote items selected.');
+    return;
+  }
+
+  const items = selectedPaths.map(p => {
+    const name = getPathBaseName(p);
+    const cached = remoteFilesCache.find(f => joinPath(currentRemotePath, f.name) === p || f.name === name);
+    const isDirectory = cached ? cached.type === 'directory' : false;
+    return {
+      remotePath: p,
+      localPath: joinPath(currentLocalPath, name),
+      isDirectory,
+    };
+  });
+
+  showToast('info', `Queuing batch download for ${items.length} item(s)...`);
+
+  try {
+    const res = await fetch('/api/enqueue-batch-download', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items, localDir: currentLocalPath }),
+    });
+    const data = await res.json();
+    if (data.success) {
+      showToast('success', `✅ Queued download for ${items.length} item(s) to local folder.`);
+      clearSelection('remote');
+      switchDockTab('transfers');
+      fetchTransfers();
+    } else {
+      showToast('error', `Batch download failed: ${data.error}`);
+    }
+  } catch (err) {
+    showToast('error', `Error during batch download: ${err.message}`);
+  }
+}
+
+async function uploadSelectedLocalItems() {
+  if (!isConnected) {
+    showToast('error', 'Connect to SSH / SFTP server first!');
+    return;
+  }
+  const selectedPaths = Array.from(selectedLocalPaths);
+  if (selectedPaths.length === 0) {
+    showToast('info', 'No local items selected.');
+    return;
+  }
+
+  const items = selectedPaths.map(p => {
+    const name = getPathBaseName(p);
+    const cached = localFilesCache.find(f => joinPath(currentLocalPath, f.name) === p || f.name === name);
+    const isDirectory = cached ? cached.type === 'directory' : false;
+    return {
+      localPath: p,
+      remotePath: joinPath(currentRemotePath, name),
+      isDirectory,
+    };
+  });
+
+  showToast('info', `Queuing batch upload for ${items.length} item(s)...`);
+
+  try {
+    const res = await fetch('/api/enqueue-batch-upload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items, remoteDir: currentRemotePath }),
+    });
+    const data = await res.json();
+    if (data.success) {
+      showToast('success', `✅ Queued upload for ${items.length} item(s) to remote folder.`);
+      clearSelection('local');
+      switchDockTab('transfers');
+      fetchTransfers();
+    } else {
+      showToast('error', `Batch upload failed: ${data.error}`);
+    }
+  } catch (err) {
+    showToast('error', `Error during batch upload: ${err.message}`);
+  }
+}
+
+async function deleteSelectedItems(panel) {
+  const selSet = panel === 'local' ? selectedLocalPaths : selectedRemotePaths;
+  const count = selSet.size;
+  if (count === 0) {
+    showToast('info', `No ${panel} items selected.`);
+    return;
+  }
+
+  const promptMsg = `Are you sure you want to permanently delete ${count} selected ${panel} item(s)?\nThis action cannot be undone.`;
+  if (!confirm(promptMsg)) return;
+
+  const fileCache = panel === 'local' ? localFilesCache : remoteFilesCache;
+  const currentPath = panel === 'local' ? currentLocalPath : currentRemotePath;
+
+  const items = Array.from(selSet).map(p => {
+    const name = getPathBaseName(p);
+    const cached = fileCache.find(f => joinPath(currentPath, f.name) === p || f.name === name);
+    const isDirectory = cached ? cached.type === 'directory' : false;
+    return panel === 'local'
+      ? { localPath: p, isDirectory }
+      : { remotePath: p, isDirectory };
+  });
+
+  showToast('info', `Deleting ${count} ${panel} item(s)...`);
+
+  try {
+    const endpoint = panel === 'local' ? '/api/delete-batch-local' : '/api/delete-batch-remote';
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items }),
+    });
+    const data = await res.json();
+    if (data.success) {
+      showToast('info', `Deleted ${data.count || count} ${panel} item(s).`);
+      clearSelection(panel);
+      if (panel === 'local') refreshLocal();
+      else refreshRemote();
+    } else {
+      showToast('error', `Delete error: ${data.error || 'Failed'}`);
+    }
+  } catch (err) {
+    showToast('error', `Error deleting items: ${err.message}`);
+  }
+}
+
+// -------------------------------------------------------------
+// 10. Table Event Delegation & Central Click Handling
+// -------------------------------------------------------------
+function initTableEventDelegation() {
+  const localBody = document.getElementById('localFileBody');
+  const remoteBody = document.getElementById('remoteFileBody');
+
+  if (localBody) {
+    setupTbodyListeners(localBody, 'local');
+  }
+  if (remoteBody) {
+    setupTbodyListeners(remoteBody, 'remote');
+  }
+}
+
+function setupTbodyListeners(tbody, panel) {
+  let lastClickTime = 0;
+  let lastClickedPath = '';
+
+  tbody.addEventListener('change', (e) => {
+    const chk = e.target.closest('.row-checkbox');
+    if (chk) {
+      const row = chk.closest('tr');
+      if (row) {
+        const path = row.getAttribute('data-path');
+        const idx = parseInt(row.getAttribute('data-index'), 10);
+        toggleItemSelection(panel, path, chk.checked, idx);
+        setFocusIndex(panel, idx);
+      }
+    }
+  });
+
+  tbody.addEventListener('click', (e) => {
+    setActivePanel(panel);
+    const actionBtn = e.target.closest('[data-action]');
+    if (actionBtn) {
+      e.stopPropagation();
+      handleRowActionClick(panel, actionBtn);
+      return;
+    }
+
+    const chk = e.target.closest('.row-checkbox');
+    if (chk) {
+      const row = chk.closest('tr');
+      if (row) {
+        const path = row.getAttribute('data-path');
+        const idx = parseInt(row.getAttribute('data-index'), 10);
+        toggleItemSelection(panel, path, chk.checked, idx);
+        setFocusIndex(panel, idx);
+      }
+      return;
+    }
+
+    const colChk = e.target.closest('.col-checkbox');
+    if (colChk) {
+      const row = colChk.closest('tr');
+      if (row) {
+        const path = row.getAttribute('data-path');
+        const idx = parseInt(row.getAttribute('data-index'), 10);
+        const selSet = panel === 'local' ? selectedLocalPaths : selectedRemotePaths;
+        const newState = !selSet.has(path);
+        toggleItemSelection(panel, path, newState, idx);
+        setFocusIndex(panel, idx);
+      }
+      return;
+    }
+
+    const row = e.target.closest('tr[data-path]');
+    if (!row) return;
+
+    const path = row.getAttribute('data-path');
+    const name = row.getAttribute('data-name');
+    const isDir = row.getAttribute('data-type') === 'directory';
+    const idx = parseInt(row.getAttribute('data-index'), 10);
+
+    const now = Date.now();
+    const isDoubleClick = (now - lastClickTime < 320) && (lastClickedPath === path);
+    lastClickTime = now;
+    lastClickedPath = path;
+
+    if (isDoubleClick) {
+      if (isDir) {
+        if (panel === 'local') navigateLocalPath(path);
+        else navigateRemotePath(path);
+      } else {
+        if (panel === 'local') viewLocalFile(path, name);
+        else viewRemoteFile(path, name);
+      }
+      return;
+    }
+
+    // Single click handling
+    setFocusIndex(panel, idx);
+
+    if (e.shiftKey) {
+      const anchorIdx = panel === 'local' ? lastSelectedLocalIndex : lastSelectedRemoteIndex;
+      const start = anchorIdx === -1 ? 0 : anchorIdx;
+      selectRange(panel, start, idx);
+    } else if (e.ctrlKey || e.metaKey) {
+      toggleItemSelection(panel, path, undefined, idx);
+    }
+  });
+
+  tbody.addEventListener('dblclick', (e) => {
+    const row = e.target.closest('tr[data-path]');
+    if (!row) return;
+    const path = row.getAttribute('data-path');
+    const name = row.getAttribute('data-name');
+    const isDir = row.getAttribute('data-type') === 'directory';
+
+    if (isDir) {
+      if (panel === 'local') navigateLocalPath(path);
+      else navigateRemotePath(path);
+    } else {
+      if (panel === 'local') viewLocalFile(path, name);
+      else viewRemoteFile(path, name);
+    }
+  });
+}
+
+function handleRowActionClick(panel, btn) {
+  const action = btn.getAttribute('data-action');
+  const path = btn.getAttribute('data-path');
+  const name = btn.getAttribute('data-name');
+  const isDir = btn.getAttribute('data-type') === 'directory';
+
+  if (panel === 'local') {
+    if (action === 'view') viewLocalFile(path, name);
+    else if (action === 'upload') queueUpload(path, name);
+    else if (action === 'folder-up') queueUploadFolder(path, name);
+    else if (action === 'delete') deleteLocalItem(path, isDir);
+  } else {
+    if (action === 'view') viewRemoteFile(path, name);
+    else if (action === 'download') {
+      const targetLocal = joinPath(currentLocalPath, name);
+      queueDownload(path, targetLocal);
+    } else if (action === 'folder-down') queueDownloadFolder(path, name);
+    else if (action === 'delete') deleteRemoteItem(path, isDir);
+  }
+}
+
+// -------------------------------------------------------------
+// 11. Local Filesystem Explorer & File Actions
 // -------------------------------------------------------------
 async function fetchInitialLocalDir() {
   try {
     const res = await fetch('/api/local-home');
     const data = await res.json();
-    currentLocalPath = normalizePath(data.path);
+    localHomePath = normalizePath(data.path);
+    currentLocalPath = localHomePath;
     fetchLocalFiles(currentLocalPath);
   } catch (err) {
     console.error('Failed to get local home:', err);
   }
 }
 
-async function fetchLocalFiles(path) {
+async function fetchLocalFiles(path, pushHistory = true) {
+  const previousPath = currentLocalPath;
   try {
     const target = normalizePath(path || currentLocalPath);
-    renderBreadcrumbs('local', target);
     const res = await fetch(`/api/list-local?path=${encodeURIComponent(target)}`);
     const data = await res.json();
     if (data.error) {
-      showToast('error', `Failed to load local files: ${data.error}`);
+      showToast('error', `Failed to open directory: ${data.error}`);
+      if (previousPath && previousPath !== target) {
+        renderBreadcrumbs('local', previousPath);
+      }
       return;
     }
     currentLocalPath = normalizePath(data.currentPath || target);
+    recordLocalPathAccess(currentLocalPath);
     localFilesCache = data.files || (Array.isArray(data) ? data : []);
+    focusedLocalIndex = -1;
+    lastSelectedLocalIndex = -1;
+    selectedLocalPaths.clear();
+    renderBreadcrumbs('local', currentLocalPath);
+    if (pushHistory) pushLocalHistory(currentLocalPath);
+    else updateHistoryButtons();
     applyLocalFileFilter();
   } catch (err) {
     showToast('error', `Failed to load local files: ${err.message}`);
+    if (previousPath) renderBreadcrumbs('local', previousPath);
   }
 }
 
@@ -1247,11 +2066,12 @@ function isItemTransferring(filePath) {
 function renderLocalFiles(files) {
   const tbody = document.getElementById('localFileBody');
   if (!files || files.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="5" class="empty-state"><i class="fa-solid fa-folder-open"></i><p>No files found.</p></td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" class="empty-state"><i class="fa-solid fa-folder-open"></i><p>No files found.</p></td></tr>';
+    updateSelectionUI('local');
     return;
   }
 
-  tbody.innerHTML = files.map(file => {
+  tbody.innerHTML = files.map((file, idx) => {
     const isDir = file.type === 'directory';
     const iconClass = getFileIconClass(file.name, isDir);
     const sizeStr = isDir ? '--' : formatBytes(file.size);
@@ -1259,9 +2079,19 @@ function renderLocalFiles(files) {
     const fullPath = joinPath(currentLocalPath, file.name);
     const transferring = isItemTransferring(fullPath);
     const recent = isItemRecent(file, fullPath);
+    const isSelected = selectedLocalPaths.has(fullPath);
+    const isFocused = focusedLocalIndex === idx;
 
     return `
-      <tr class="${isDir ? 'dir-row' : ''} ${transferring ? 'row-transferring' : ''}" ${isDir ? `onclick="navigateLocalPath('${escapeHtml(fullPath)}')"` : ''}>
+      <tr class="${isDir ? 'dir-row' : ''} ${transferring ? 'row-transferring' : ''} ${isSelected ? 'row-selected' : ''} ${isFocused ? 'row-focused' : ''}"
+          data-path="${escapeHtml(fullPath)}"
+          data-name="${escapeHtml(file.name)}"
+          data-type="${file.type}"
+          data-index="${idx}"
+          data-panel="local">
+        <td class="col-checkbox">
+          <input type="checkbox" class="row-checkbox" ${isSelected ? 'checked' : ''} title="Select item (Space)">
+        </td>
         <td class="col-icon"><i class="${iconClass}"></i></td>
         <td class="col-name" title="${escapeHtml(file.name)}">
           <div class="file-name-wrapper">
@@ -1272,25 +2102,25 @@ function renderLocalFiles(files) {
         </td>
         <td class="col-size">${sizeStr}</td>
         <td class="col-date">${dateStr}</td>
-        <td class="col-action" onclick="event.stopPropagation()">
+        <td class="col-action">
           <div class="row-actions">
             ${!isDir ? `
-              <button onclick="viewLocalFile('${escapeHtml(fullPath)}', '${escapeHtml(file.name)}')" class="btn-icon-action btn-view" title="Preview file">
+              <button class="btn-icon-action btn-view" data-action="view" data-path="${escapeHtml(fullPath)}" data-name="${escapeHtml(file.name)}" data-type="${file.type}" title="Preview file">
                 <i class="fa-solid fa-eye"></i>
               </button>
             ` : ''}
             ${isConnected ? (
               isDir ? `
-                <button onclick="queueUploadFolder('${escapeHtml(fullPath)}', '${escapeHtml(file.name)}')" class="btn-icon-action btn-folder-up" title="Upload folder to remote server">
+                <button class="btn-icon-action btn-folder-up" data-action="folder-up" data-path="${escapeHtml(fullPath)}" data-name="${escapeHtml(file.name)}" data-type="${file.type}" title="Upload folder to remote server">
                   <i class="fa-solid fa-cloud-arrow-up"></i>
                 </button>
               ` : `
-                <button onclick="queueUpload('${escapeHtml(fullPath)}', '${escapeHtml(file.name)}')" class="btn-icon-action btn-upload" title="Upload file to remote server">
+                <button class="btn-icon-action btn-upload" data-action="upload" data-path="${escapeHtml(fullPath)}" data-name="${escapeHtml(file.name)}" data-type="${file.type}" title="Upload file to remote server">
                   <i class="fa-solid fa-cloud-arrow-up"></i>
                 </button>
               `
             ) : ''}
-            <button onclick="deleteLocalItem('${escapeHtml(fullPath)}', ${isDir})" class="btn-icon-action btn-delete" title="Delete ${isDir ? 'folder' : 'file'} from local">
+            <button class="btn-icon-action btn-delete" data-action="delete" data-path="${escapeHtml(fullPath)}" data-name="${escapeHtml(file.name)}" data-type="${file.type}" title="Delete ${isDir ? 'folder' : 'file'} from local">
               <i class="fa-solid fa-trash-can"></i>
             </button>
           </div>
@@ -1298,25 +2128,28 @@ function renderLocalFiles(files) {
       </tr>
     `;
   }).join('');
+
+  updateSelectionUI('local');
 }
 
 function filterLocalFiles(query) {
   applyLocalFileFilter();
 }
 
-function navigateLocalPath(path) {
+function navigateLocalPath(path, pushHistory = true) {
   const norm = normalizePath(path);
-  currentLocalPath = norm;
-  fetchLocalFiles(norm);
+  fetchLocalFiles(norm, pushHistory);
 }
 
 function navigateLocalUp() {
   const parent = getParentPath(currentLocalPath, true);
-  navigateLocalPath(parent);
+  if (parent !== currentLocalPath) {
+    navigateLocalPath(parent);
+  }
 }
 
 function refreshLocal() {
-  fetchLocalFiles(currentLocalPath);
+  fetchLocalFiles(currentLocalPath, false);
 }
 
 async function promptCreateLocalDir() {
@@ -1354,6 +2187,7 @@ async function deleteLocalItem(localPath, isDirectory) {
     const data = await res.json();
     if (data.success) {
       showToast('info', `Deleted local ${itemType}: ${name}`);
+      selectedLocalPaths.delete(localPath);
       refreshLocal();
     } else {
       showToast('error', `Error deleting local item: ${data.error}`);
@@ -1364,13 +2198,13 @@ async function deleteLocalItem(localPath, isDirectory) {
 }
 
 // -------------------------------------------------------------
-// 7. Remote SFTP Explorer & File Actions
+// 12. Remote SFTP Explorer & File Actions
 // -------------------------------------------------------------
-async function fetchRemoteFiles(path) {
+async function fetchRemoteFiles(path, pushHistory = true) {
   if (!isConnected) return;
+  const previousPath = currentRemotePath;
   try {
     const target = normalizePath(path || currentRemotePath);
-    renderBreadcrumbs('remote', target);
     const dropLabel = document.getElementById('dropzonePathLabel');
     if (dropLabel) dropLabel.innerText = target;
 
@@ -1378,35 +2212,55 @@ async function fetchRemoteFiles(path) {
     const data = await res.json();
     if (data.error) {
       showToast('error', `Remote error: ${data.error}`);
+      if (previousPath && previousPath !== target) {
+        renderBreadcrumbs('remote', previousPath);
+      }
       return;
     }
     currentRemotePath = normalizePath(data.currentPath || target);
     remoteFilesCache = data.files || (Array.isArray(data) ? data : []);
+    focusedRemoteIndex = -1;
+    lastSelectedRemoteIndex = -1;
+    selectedRemotePaths.clear();
+    renderBreadcrumbs('remote', currentRemotePath);
+    if (pushHistory) pushRemoteHistory(currentRemotePath);
+    else updateHistoryButtons();
     applyRemoteFileFilter();
   } catch (err) {
     showToast('error', `Failed to list remote directory: ${err.message}`);
+    if (previousPath) renderBreadcrumbs('remote', previousPath);
   }
 }
 
 function renderRemoteFiles(files) {
   const tbody = document.getElementById('remoteFileBody');
   if (!files || files.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="6" class="empty-state"><div class="empty-illustration"><i class="fa-solid fa-tower-broadcast"></i><p>Enter connection parameters above and click <strong>Connect</strong> to explore remote files.</p></div></td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" class="empty-state"><div class="empty-illustration"><i class="fa-solid fa-tower-broadcast"></i><p>No files found or not connected.</p></div></td></tr>';
+    updateSelectionUI('remote');
     return;
   }
 
-  tbody.innerHTML = files.map(file => {
+  tbody.innerHTML = files.map((file, idx) => {
     const isDir = file.type === 'directory';
     const iconClass = getFileIconClass(file.name, isDir);
     const sizeStr = isDir ? '--' : formatBytes(file.size);
     const dateStr = formatFileDate(file.modifyTime);
     const targetRemotePath = joinPath(currentRemotePath, file.name);
-    const targetLocalPath = joinPath(currentLocalPath, file.name);
     const transferring = isItemTransferring(targetRemotePath);
     const recent = isItemRecent(file, targetRemotePath);
+    const isSelected = selectedRemotePaths.has(targetRemotePath);
+    const isFocused = focusedRemoteIndex === idx;
 
     return `
-      <tr class="${isDir ? 'dir-row' : ''} ${transferring ? 'row-transferring' : ''}" ${isDir ? `onclick="navigateRemotePath('${escapeHtml(targetRemotePath)}')"` : ''}>
+      <tr class="${isDir ? 'dir-row' : ''} ${transferring ? 'row-transferring' : ''} ${isSelected ? 'row-selected' : ''} ${isFocused ? 'row-focused' : ''}"
+          data-path="${escapeHtml(targetRemotePath)}"
+          data-name="${escapeHtml(file.name)}"
+          data-type="${file.type}"
+          data-index="${idx}"
+          data-panel="remote">
+        <td class="col-checkbox">
+          <input type="checkbox" class="row-checkbox" ${isSelected ? 'checked' : ''} title="Select item (Space)">
+        </td>
         <td class="col-icon"><i class="${iconClass}"></i></td>
         <td class="col-name" title="${escapeHtml(file.name)}">
           <div class="file-name-wrapper">
@@ -1418,23 +2272,23 @@ function renderRemoteFiles(files) {
         <td class="col-size">${sizeStr}</td>
         <td class="col-date">${dateStr}</td>
         <td class="col-perm"><code>${file.permissions || ''}</code></td>
-        <td class="col-action" onclick="event.stopPropagation()">
+        <td class="col-action">
           <div class="row-actions">
             ${!isDir ? `
-              <button onclick="viewRemoteFile('${escapeHtml(targetRemotePath)}', '${escapeHtml(file.name)}')" class="btn-icon-action btn-view" title="Preview remote file">
+              <button class="btn-icon-action btn-view" data-action="view" data-path="${escapeHtml(targetRemotePath)}" data-name="${escapeHtml(file.name)}" data-type="${file.type}" title="Preview remote file">
                 <i class="fa-solid fa-eye"></i>
               </button>
             ` : ''}
             ${isDir ? `
-              <button onclick="queueDownloadFolder('${escapeHtml(targetRemotePath)}', '${escapeHtml(file.name)}')" class="btn-icon-action btn-folder-down" title="Download folder to local">
+              <button class="btn-icon-action btn-folder-down" data-action="folder-down" data-path="${escapeHtml(targetRemotePath)}" data-name="${escapeHtml(file.name)}" data-type="${file.type}" title="Download folder to local">
                 <i class="fa-solid fa-download"></i>
               </button>
             ` : `
-              <button onclick="queueDownload('${escapeHtml(targetRemotePath)}', '${escapeHtml(targetLocalPath)}')" class="btn-icon-action btn-download" title="Download file to local">
+              <button class="btn-icon-action btn-download" data-action="download" data-path="${escapeHtml(targetRemotePath)}" data-name="${escapeHtml(file.name)}" data-type="${file.type}" title="Download file to local">
                 <i class="fa-solid fa-cloud-arrow-down"></i>
               </button>
             `}
-            <button onclick="deleteRemoteItem('${escapeHtml(targetRemotePath)}', ${isDir})" class="btn-icon-action btn-delete" title="Delete from server">
+            <button class="btn-icon-action btn-delete" data-action="delete" data-path="${escapeHtml(targetRemotePath)}" data-name="${escapeHtml(file.name)}" data-type="${file.type}" title="Delete from server">
               <i class="fa-solid fa-trash-can"></i>
             </button>
           </div>
@@ -1442,25 +2296,28 @@ function renderRemoteFiles(files) {
       </tr>
     `;
   }).join('');
+
+  updateSelectionUI('remote');
 }
 
 function filterRemoteFiles(query) {
   applyRemoteFileFilter();
 }
 
-function navigateRemotePath(path) {
+function navigateRemotePath(path, pushHistory = true) {
   const norm = normalizePath(path);
-  currentRemotePath = norm;
-  fetchRemoteFiles(norm);
+  fetchRemoteFiles(norm, pushHistory);
 }
 
 function navigateRemoteUp() {
   const parent = getParentPath(currentRemotePath, false);
-  navigateRemotePath(parent);
+  if (parent !== currentRemotePath) {
+    navigateRemotePath(parent);
+  }
 }
 
 function refreshRemote() {
-  fetchRemoteFiles(currentRemotePath);
+  fetchRemoteFiles(currentRemotePath, false);
 }
 
 async function promptCreateRemoteDir() {
@@ -1498,6 +2355,7 @@ async function deleteRemoteItem(remotePath, isDirectory) {
     const data = await res.json();
     if (data.success) {
       showToast('info', `Deleted remote ${itemType}: ${name}`);
+      selectedRemotePaths.delete(remotePath);
       refreshRemote();
     } else {
       showToast('error', `Error deleting remote item: ${data.error}`);
@@ -1508,12 +2366,249 @@ async function deleteRemoteItem(remotePath, isDirectory) {
 }
 
 // -------------------------------------------------------------
-// 8. In-App File Viewer Engine
+// 8. In-App Interactive File Viewer Engine & Quick Access
 // -------------------------------------------------------------
-async function viewLocalFile(filePath, fileName) {
-  openFileViewerModal(fileName, filePath, 'Local File');
+let viewerState = {
+  activeFile: null,
+  fileList: [],
+  currentIndex: -1,
+  panel: 'local',
+  zoom: 1.0,
+  showLineNumbers: true,
+  wordWrap: false,
+  isFullscreen: false,
+};
+
+let localPathAccessHistory = JSON.parse(localStorage.getItem('sftp_local_path_access') || '[]');
+let localCommonPlacesCache = [];
+
+function recordLocalPathAccess(dirPath) {
+  if (!dirPath || dirPath === '.') return;
+  const norm = normalizePath(dirPath);
+  const name = getPathBaseName(norm) || norm;
+  const existingIdx = localPathAccessHistory.findIndex(item => item.path === norm);
+
+  if (existingIdx !== -1) {
+    localPathAccessHistory[existingIdx].count = (localPathAccessHistory[existingIdx].count || 1) + 1;
+    localPathAccessHistory[existingIdx].lastAccessed = Date.now();
+    localPathAccessHistory[existingIdx].name = name;
+  } else {
+    localPathAccessHistory.unshift({
+      path: norm,
+      name: name,
+      count: 1,
+      lastAccessed: Date.now()
+    });
+  }
+
+  if (localPathAccessHistory.length > 40) {
+    localPathAccessHistory = localPathAccessHistory.slice(0, 40);
+  }
+
+  localStorage.setItem('sftp_local_path_access', JSON.stringify(localPathAccessHistory));
+}
+
+async function loadLocalCommonPlaces() {
   try {
-    const res = await fetch(`/api/read-file-local?path=${encodeURIComponent(filePath)}`);
+    const res = await fetch('/api/local-places');
+    const data = await res.json();
+    if (data.places) {
+      localCommonPlacesCache = data.places;
+    }
+  } catch (err) {}
+}
+
+function toggleQuickAccessPopover() {
+  const popover = document.getElementById('localQuickAccessPopover');
+  if (!popover) return;
+  if (popover.style.display === 'none' || !popover.style.display) {
+    renderQuickAccessPopover();
+    popover.style.display = 'flex';
+  } else {
+    popover.style.display = 'none';
+  }
+}
+
+function closeQuickAccessPopover() {
+  const popover = document.getElementById('localQuickAccessPopover');
+  if (popover) popover.style.display = 'none';
+}
+
+function clearLocalPathHistory() {
+  localPathAccessHistory = [];
+  localStorage.removeItem('sftp_local_path_access');
+  renderQuickAccessPopover();
+  showToast('info', 'Local path history cleared.');
+}
+
+function renderQuickAccessPopover() {
+  const placesGrid = document.getElementById('localCommonPlacesGrid');
+  const freqList = document.getElementById('localFreqPathsList');
+  const recentList = document.getElementById('localRecentPathsList');
+  const sectionFreq = document.getElementById('sectionFreqPaths');
+  const sectionRecent = document.getElementById('sectionRecentPaths');
+
+  if (placesGrid) {
+    const places = localCommonPlacesCache.length > 0 ? localCommonPlacesCache : [
+      { name: 'Downloads', path: localHomePath, icon: 'fa-download' }
+    ];
+    placesGrid.innerHTML = places.map(p => `
+      <div class="quick-place-chip" onclick="navigateFromQuickAccess('${escapeHtml(p.path)}')" title="${escapeHtml(p.path)}">
+        <i class="fa-solid ${p.icon || 'fa-folder'}"></i>
+        <span>${escapeHtml(p.name)}</span>
+      </div>
+    `).join('');
+  }
+
+  // Frequently accessed paths (sorted by count)
+  const freqItems = [...localPathAccessHistory].sort((a, b) => (b.count || 1) - (a.count || 1)).slice(0, 6);
+  if (freqList) {
+    if (freqItems.length === 0) {
+      if (sectionFreq) sectionFreq.style.display = 'none';
+    } else {
+      if (sectionFreq) sectionFreq.style.display = 'block';
+      freqList.innerHTML = freqItems.map(item => `
+        <div class="quick-path-row" onclick="navigateFromQuickAccess('${escapeHtml(item.path)}')" title="${escapeHtml(item.path)}">
+          <div class="quick-path-info">
+            <i class="fa-solid fa-folder"></i>
+            <span class="quick-path-name">${escapeHtml(item.name)}</span>
+          </div>
+          <span class="quick-path-badge">${item.count || 1} visits</span>
+        </div>
+      `).join('');
+    }
+  }
+
+  // Last accessed paths (sorted by lastAccessed time)
+  const recentItems = [...localPathAccessHistory].sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0)).slice(0, 8);
+  if (recentList) {
+    if (recentItems.length === 0) {
+      if (sectionRecent) sectionRecent.style.display = 'none';
+    } else {
+      if (sectionRecent) sectionRecent.style.display = 'block';
+      recentList.innerHTML = recentItems.map(item => {
+        const timeAgo = formatTimeAgo(item.lastAccessed);
+        return `
+          <div class="quick-path-row" onclick="navigateFromQuickAccess('${escapeHtml(item.path)}')" title="${escapeHtml(item.path)}">
+            <div class="quick-path-info">
+              <i class="fa-regular fa-clock"></i>
+              <span class="quick-path-name">${escapeHtml(item.name)}</span>
+            </div>
+            <span class="quick-path-badge">${timeAgo}</span>
+          </div>
+        `;
+      }).join('');
+    }
+  }
+}
+
+function formatTimeAgo(timestamp) {
+  if (!timestamp) return 'Recent';
+  const diff = Date.now() - timestamp;
+  const secs = Math.floor(diff / 1000);
+  if (secs < 60) return 'Just now';
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  return `${days}d ago`;
+}
+
+function navigateFromQuickAccess(path) {
+  closeQuickAccessPopover();
+  navigateLocalPath(path);
+}
+
+// File Viewer Engine
+async function viewLocalFile(filePath, fileName) {
+  const visibleFiles = getFilteredLocalFiles().filter(f => f.type !== 'directory');
+  const index = visibleFiles.findIndex(f => joinPath(currentLocalPath, f.name) === filePath || f.name === fileName);
+  openFileViewerModal(fileName, filePath, 'Local File', 'local', visibleFiles, index);
+  loadViewerFileContent(filePath, fileName, 'local');
+}
+
+async function viewRemoteFile(remotePath, fileName) {
+  const visibleFiles = getFilteredRemoteFiles().filter(f => f.type !== 'directory');
+  const index = visibleFiles.findIndex(f => joinPath(currentRemotePath, f.name) === remotePath || f.name === fileName);
+  openFileViewerModal(fileName, remotePath, 'Remote SFTP File', 'remote', visibleFiles, index);
+  loadViewerFileContent(remotePath, fileName, 'remote');
+}
+
+function openFileViewerModal(fileName, path, locationLabel, panel = 'local', fileList = [], fileIndex = 0) {
+  viewerState.activeFile = { fileName, path, locationLabel, content: '' };
+  viewerState.panel = panel;
+  viewerState.fileList = fileList && fileList.length > 0 ? fileList : [{ name: fileName }];
+  viewerState.currentIndex = fileIndex >= 0 ? fileIndex : 0;
+  viewerState.zoom = 1.0;
+
+  const modal = document.getElementById('fileViewerModal');
+  const title = document.getElementById('viewerFileName');
+  const subtitle = document.getElementById('viewerMetaSubtitle');
+  const pathLabel = document.getElementById('viewerFooterPath');
+  const loader = document.getElementById('viewerLoading');
+  const container = document.getElementById('viewerContentContainer');
+
+  if (title) title.innerText = fileName;
+  if (subtitle) subtitle.innerText = `${locationLabel} • Loading...`;
+  if (pathLabel) pathLabel.innerText = path;
+  if (loader) loader.style.display = 'flex';
+  if (container) {
+    container.style.display = 'none';
+    container.innerHTML = '';
+  }
+
+  updateViewerNavButtons();
+  if (modal) modal.classList.add('open');
+}
+
+function updateViewerNavButtons() {
+  const navIndex = document.getElementById('viewerNavIndex');
+  const prevBtn = document.getElementById('btnViewerPrev');
+  const nextBtn = document.getElementById('btnViewerNext');
+  const count = viewerState.fileList ? viewerState.fileList.length : 1;
+  const current = viewerState.currentIndex + 1;
+
+  if (navIndex) navIndex.innerText = `${current}/${count}`;
+  if (prevBtn) prevBtn.disabled = count <= 1;
+  if (nextBtn) nextBtn.disabled = count <= 1;
+}
+
+function previewAdjacentFile(delta) {
+  if (!viewerState.fileList || viewerState.fileList.length <= 1) return;
+  let newIdx = viewerState.currentIndex + delta;
+  if (newIdx < 0) newIdx = viewerState.fileList.length - 1;
+  else if (newIdx >= viewerState.fileList.length) newIdx = 0;
+
+  const nextFile = viewerState.fileList[newIdx];
+  if (!nextFile) return;
+
+  const currentPath = viewerState.panel === 'local' ? currentLocalPath : currentRemotePath;
+  const fullPath = joinPath(currentPath, nextFile.name);
+  const locationLabel = viewerState.panel === 'local' ? 'Local File' : 'Remote SFTP File';
+
+  viewerState.currentIndex = newIdx;
+  updateViewerNavButtons();
+
+  const title = document.getElementById('viewerFileName');
+  const pathLabel = document.getElementById('viewerFooterPath');
+  const loader = document.getElementById('viewerLoading');
+  const container = document.getElementById('viewerContentContainer');
+
+  if (title) title.innerText = nextFile.name;
+  if (pathLabel) pathLabel.innerText = fullPath;
+  if (loader) loader.style.display = 'flex';
+  if (container) container.style.display = 'none';
+
+  loadViewerFileContent(fullPath, nextFile.name, viewerState.panel);
+}
+
+async function loadViewerFileContent(filePath, fileName, panel) {
+  try {
+    const endpoint = panel === 'local'
+      ? `/api/read-file-local?path=${encodeURIComponent(filePath)}`
+      : `/api/read-file-remote?path=${encodeURIComponent(filePath)}`;
+    const res = await fetch(endpoint);
     const data = await res.json();
     if (data.error) {
       renderViewerError(data.error);
@@ -1525,42 +2620,13 @@ async function viewLocalFile(filePath, fileName) {
   }
 }
 
-async function viewRemoteFile(remotePath, fileName) {
-  openFileViewerModal(fileName, remotePath, 'Remote SFTP File');
-  try {
-    const res = await fetch(`/api/read-file-remote?path=${encodeURIComponent(remotePath)}`);
-    const data = await res.json();
-    if (data.error) {
-      renderViewerError(data.error);
-      return;
-    }
-    renderViewerContent(data, remotePath, fileName);
-  } catch (err) {
-    renderViewerError(err.message);
-  }
-}
-
-function openFileViewerModal(fileName, path, locationLabel) {
-  activeViewerFile = { fileName, path, locationLabel, content: '' };
-  const modal = document.getElementById('fileViewerModal');
-  const title = document.getElementById('viewerFileName');
-  const subtitle = document.getElementById('viewerMetaSubtitle');
-  const pathLabel = document.getElementById('viewerFooterPath');
-  const loader = document.getElementById('viewerLoading');
-  const container = document.getElementById('viewerContentContainer');
-
-  title.innerText = fileName;
-  subtitle.innerText = `${locationLabel} • Loading...`;
-  pathLabel.innerText = path;
-  loader.style.display = 'flex';
-  container.style.display = 'none';
-  container.innerHTML = '';
-  modal.classList.add('open');
-}
-
 function closeFileViewer() {
-  document.getElementById('fileViewerModal').classList.remove('open');
-  activeViewerFile = null;
+  const modal = document.getElementById('fileViewerModal');
+  if (modal) modal.classList.remove('open');
+  if (viewerState.isFullscreen) {
+    toggleViewerFullscreen();
+  }
+  viewerState.activeFile = null;
 }
 
 function renderViewerContent(data, path, fileName) {
@@ -1568,72 +2634,189 @@ function renderViewerContent(data, path, fileName) {
   const container = document.getElementById('viewerContentContainer');
   const subtitle = document.getElementById('viewerMetaSubtitle');
   const copyBtn = document.getElementById('btnCopyViewer');
+  const typePill = document.getElementById('viewerTypePill');
+  const statsPill = document.getElementById('viewerStatsPill');
+  const zoomControls = document.getElementById('viewerZoomControls');
+  const textControls = document.getElementById('viewerTextControls');
 
-  loader.style.display = 'none';
-  container.style.display = 'block';
+  if (loader) loader.style.display = 'none';
+  if (container) container.style.display = 'flex';
 
   const sizeFormatted = formatBytes(data.size);
   const dateFormatted = data.mtime ? formatFileDate(data.mtime) : 'Recent';
-  subtitle.innerText = `${activeViewerFile.locationLabel} • ${sizeFormatted} • Modified ${dateFormatted}`;
+  if (subtitle && viewerState.activeFile) {
+    subtitle.innerText = `${viewerState.activeFile.locationLabel} • ${sizeFormatted} • Modified ${dateFormatted}`;
+  }
 
   if (data.isImage && data.dataUrl) {
-    activeViewerFile.content = '';
-    copyBtn.style.display = 'none';
+    viewerState.activeFile.content = '';
+    if (copyBtn) copyBtn.style.display = 'none';
+    if (zoomControls) zoomControls.style.display = 'flex';
+    if (textControls) textControls.style.display = 'none';
+    if (typePill) typePill.innerText = 'IMAGE';
+    if (statsPill) statsPill.innerText = sizeFormatted;
+
     container.innerHTML = `
-      <div class="viewer-img-container">
-        <img src="${data.dataUrl}" alt="${escapeHtml(fileName)}">
+      <div class="viewer-img-container" id="viewerImgContainer" onwheel="handleViewerWheelZoom(event)">
+        <div class="viewer-img-wrapper" id="viewerImgWrapper">
+          <img src="${data.dataUrl}" alt="${escapeHtml(fileName)}" id="viewerImgEl" onload="updateImageStats(this, '${sizeFormatted}')">
+        </div>
       </div>
     `;
+    resetViewerZoom();
   } else if (data.isText && data.content !== undefined) {
-    activeViewerFile.content = data.content;
-    copyBtn.style.display = 'inline-flex';
+    viewerState.activeFile.content = data.content;
+    if (copyBtn) copyBtn.style.display = 'inline-flex';
+    if (zoomControls) zoomControls.style.display = 'none';
+    if (textControls) textControls.style.display = 'flex';
+    if (typePill) typePill.innerText = getFileTypePillLabel(fileName);
+
+    const lines = data.content.split(/\r?\n/);
+    const lineCount = lines.length;
+    const charCount = data.content.length;
+    if (statsPill) statsPill.innerText = `${lineCount} lines • ${charCount} chars • ${sizeFormatted}`;
+
+    const gutterHtml = lines.map((_, i) => `<span>${i + 1}</span>`).join('');
+    const wrapClass = viewerState.wordWrap ? 'wrap' : '';
+
     container.innerHTML = `
-      <pre class="viewer-code-block"><code>${escapeHtml(data.content)}</code></pre>
+      <div class="viewer-code-wrapper">
+        <div class="viewer-gutter" id="viewerGutter" style="display: ${viewerState.showLineNumbers ? 'flex' : 'none'};">
+          ${gutterHtml}
+        </div>
+        <pre class="viewer-code-text ${wrapClass}" id="viewerCodeText"><code>${escapeHtml(data.content)}</code></pre>
+      </div>
     `;
   } else if (data.isBinary) {
-    activeViewerFile.content = '';
-    copyBtn.style.display = 'none';
+    viewerState.activeFile.content = '';
+    if (copyBtn) copyBtn.style.display = 'none';
+    if (zoomControls) zoomControls.style.display = 'none';
+    if (textControls) textControls.style.display = 'none';
+    if (typePill) typePill.innerText = 'BINARY';
+    if (statsPill) statsPill.innerText = sizeFormatted;
+
     container.innerHTML = `
       <div class="viewer-binary-container">
         <i class="fa-solid fa-file-zipper viewer-binary-icon"></i>
         <h3>Binary / Media File</h3>
-        <p>This file is binary or compressed and cannot be previewed as text.</p>
+        <p>This file is binary or compressed and cannot be previewed as text directly.</p>
         <button class="btn btn-primary btn-sm" onclick="downloadViewerFile()"><i class="fa-solid fa-download"></i> Download to Inspect</button>
       </div>
     `;
   }
 }
 
+function updateImageStats(img, sizeStr) {
+  const statsPill = document.getElementById('viewerStatsPill');
+  if (statsPill && img.naturalWidth) {
+    statsPill.innerText = `${img.naturalWidth} × ${img.naturalHeight} px • ${sizeStr}`;
+  }
+}
+
+function getFileTypePillLabel(fileName) {
+  const ext = (fileName.split('.').pop() || '').toUpperCase();
+  return ext ? ext.slice(0, 6) : 'TEXT';
+}
+
+function handleViewerWheelZoom(e) {
+  e.preventDefault();
+  const delta = e.deltaY < 0 ? 0.15 : -0.15;
+  adjustViewerZoom(delta);
+}
+
+function adjustViewerZoom(delta) {
+  viewerState.zoom = Math.max(0.25, Math.min(5.0, Math.round((viewerState.zoom + delta) * 100) / 100));
+  applyViewerZoom();
+}
+
+function resetViewerZoom() {
+  viewerState.zoom = 1.0;
+  applyViewerZoom();
+}
+
+function applyViewerZoom() {
+  const imgWrapper = document.getElementById('viewerImgWrapper');
+  const zoomVal = document.getElementById('viewerZoomVal');
+  if (imgWrapper) {
+    imgWrapper.style.transform = `scale(${viewerState.zoom})`;
+  }
+  if (zoomVal) {
+    zoomVal.innerText = `${Math.round(viewerState.zoom * 100)}%`;
+  }
+}
+
+function toggleViewerLineNumbers() {
+  viewerState.showLineNumbers = !viewerState.showLineNumbers;
+  const gutter = document.getElementById('viewerGutter');
+  const btn = document.getElementById('btnViewerLineNums');
+  if (gutter) gutter.style.display = viewerState.showLineNumbers ? 'flex' : 'none';
+  if (btn) btn.classList.toggle('active', viewerState.showLineNumbers);
+}
+
+function toggleViewerWordWrap() {
+  viewerState.wordWrap = !viewerState.wordWrap;
+  const codeEl = document.getElementById('viewerCodeText');
+  const btn = document.getElementById('btnViewerWrap');
+  if (codeEl) codeEl.classList.toggle('wrap', viewerState.wordWrap);
+  if (btn) btn.classList.toggle('active', viewerState.wordWrap);
+}
+
+function toggleViewerFullscreen() {
+  viewerState.isFullscreen = !viewerState.isFullscreen;
+  const card = document.getElementById('fileViewerCard');
+  const btn = document.getElementById('btnViewerFullscreen');
+  if (card) card.classList.toggle('fullscreen', viewerState.isFullscreen);
+  if (btn) {
+    btn.innerHTML = viewerState.isFullscreen ? '<i class="fa-solid fa-compress"></i>' : '<i class="fa-solid fa-expand"></i>';
+    btn.title = viewerState.isFullscreen ? 'Exit Fullscreen' : 'Toggle Fullscreen';
+  }
+}
+
 function renderViewerError(errMsg) {
   const loader = document.getElementById('viewerLoading');
   const container = document.getElementById('viewerContentContainer');
-  loader.style.display = 'none';
-  container.style.display = 'block';
-  container.innerHTML = `
-    <div class="viewer-binary-container">
-      <i class="fa-solid fa-triangle-exclamation viewer-binary-icon" style="color: var(--accent-rose);"></i>
-      <h3>Unable to Preview File</h3>
-      <p style="color: var(--accent-rose);">${escapeHtml(errMsg)}</p>
-    </div>
-  `;
+  if (loader) loader.style.display = 'none';
+  if (container) {
+    container.style.display = 'flex';
+    container.innerHTML = `
+      <div class="viewer-binary-container">
+        <i class="fa-solid fa-triangle-exclamation viewer-binary-icon" style="color: var(--accent-rose);"></i>
+        <h3>Unable to Preview File</h3>
+        <p style="color: var(--accent-rose);">${escapeHtml(errMsg)}</p>
+      </div>
+    `;
+  }
 }
 
 function copyViewerContent() {
-  if (activeViewerFile && activeViewerFile.content) {
-    copyText(activeViewerFile.content);
+  if (viewerState.activeFile && viewerState.activeFile.content) {
+    copyText(viewerState.activeFile.content);
+    const btnText = document.getElementById('copyViewerBtnText');
+    if (btnText) {
+      btnText.innerText = 'Copied!';
+      setTimeout(() => { btnText.innerText = 'Copy'; }, 2000);
+    }
     showToast('success', 'File content copied to clipboard!');
   } else {
     showToast('info', 'No text content to copy.');
   }
 }
 
+function copyViewerPath() {
+  if (viewerState.activeFile && viewerState.activeFile.path) {
+    copyText(viewerState.activeFile.path);
+    showToast('success', 'File path copied to clipboard!');
+  }
+}
+
 function downloadViewerFile() {
-  if (!activeViewerFile) return;
-  if (activeViewerFile.locationLabel.includes('Local')) {
-    showToast('info', `File is located locally at: ${activeViewerFile.path}`);
+  if (!viewerState.activeFile) return;
+  if (viewerState.activeFile.locationLabel.includes('Local')) {
+    showToast('info', `File is located locally at: ${viewerState.activeFile.path}`);
   } else {
-    queueDownload(activeViewerFile.path, `${currentLocalPath}/${activeViewerFile.fileName}`.replace(/\/+/g, '/'));
-    showToast('success', `Queued download for ${activeViewerFile.fileName}`);
+    const targetLocal = joinPath(currentLocalPath, viewerState.activeFile.fileName);
+    queueDownload(viewerState.activeFile.path, targetLocal);
+    showToast('success', `Queued download for ${viewerState.activeFile.fileName}`);
     closeFileViewer();
   }
 }
@@ -1863,7 +3046,6 @@ function renderBreadcrumbs(type, fullPath) {
 
   const norm = normalizePath(fullPath);
   const isWindowsDrive = /^[a-zA-Z]:/.test(norm);
-  const navFn = type === 'local' ? 'navigateLocalPath' : 'navigateRemotePath';
 
   if (isWindowsDrive && type === 'local') {
     const driveMatch = norm.match(/^([a-zA-Z]:)/);
@@ -1871,7 +3053,7 @@ function renderBreadcrumbs(type, fullPath) {
     const subPath = norm.substring(driveMatch ? driveMatch[1].length : 2);
     const parts = subPath.split('/').filter(Boolean);
 
-    let html = `<span class="breadcrumb-item ${parts.length === 0 ? 'active' : ''}" onclick="${navFn}('${escapeHtml(drive)}')">${escapeHtml(drive)}</span>`;
+    let html = `<span class="breadcrumb-item ${parts.length === 0 ? 'active' : ''}" data-nav="${escapeHtml(drive)}" data-type="${type}">${escapeHtml(drive)}</span>`;
     let accumulated = drive.slice(0, -1);
 
     parts.forEach((part, idx) => {
@@ -1880,13 +3062,13 @@ function renderBreadcrumbs(type, fullPath) {
       const target = accumulated;
       html += `
         <span class="breadcrumb-sep">/</span>
-        <span class="breadcrumb-item ${isLast ? 'active' : ''}" onclick="${navFn}('${escapeHtml(target)}')">${escapeHtml(part)}</span>
+        <span class="breadcrumb-item ${isLast ? 'active' : ''}" data-nav="${escapeHtml(target)}" data-type="${type}">${escapeHtml(part)}</span>
       `;
     });
     container.innerHTML = html;
   } else {
     const parts = norm.split('/').filter(Boolean);
-    let html = `<span class="breadcrumb-item ${parts.length === 0 ? 'active' : ''}" onclick="${navFn}('/')">/</span>`;
+    let html = `<span class="breadcrumb-item ${parts.length === 0 ? 'active' : ''}" data-nav="/" data-type="${type}">/</span>`;
     let accumulated = '';
 
     parts.forEach((part, idx) => {
@@ -1895,11 +3077,24 @@ function renderBreadcrumbs(type, fullPath) {
       const target = accumulated;
       html += `
         <span class="breadcrumb-sep">/</span>
-        <span class="breadcrumb-item ${isLast ? 'active' : ''}" onclick="${navFn}('${escapeHtml(target)}')">${escapeHtml(part)}</span>
+        <span class="breadcrumb-item ${isLast ? 'active' : ''}" data-nav="${escapeHtml(target)}" data-type="${type}">${escapeHtml(part)}</span>
       `;
     });
     container.innerHTML = html;
   }
+
+  // Bind click events safely without string interpolation bugs
+  container.querySelectorAll('.breadcrumb-item').forEach(item => {
+    item.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const target = item.getAttribute('data-nav');
+      if (type === 'local') {
+        navigateLocalPath(target);
+      } else {
+        navigateRemotePath(target);
+      }
+    });
+  });
 }
 
 // -------------------------------------------------------------
@@ -2017,6 +3212,13 @@ function renderTransfersList(tasks) {
   const activeTasks = activeTransfersCache.filter(t => t.status === 'transferring' || t.status === 'queued');
   const completedTasks = activeTransfersCache.filter(t => t.status === 'completed');
   const failedTasks = activeTransfersCache.filter(t => t.status === 'failed');
+
+  if (activeTasks.length > 0) {
+    wasTransferring = true;
+  } else if (wasTransferring && activeTasks.length === 0) {
+    wasTransferring = false;
+    notifyAllTransfersCompleted();
+  }
 
   const badge = document.getElementById('transferBadge');
   if (badge) badge.innerText = activeTasks.length;
@@ -2155,8 +3357,91 @@ async function clearCompletedTransfers() {
 }
 
 // -------------------------------------------------------------
-// 12. Detachable Floating SSH Terminal Window Engine
+// 12. Detachable Floating macOS-Style SSH Terminal Window Engine
 // -------------------------------------------------------------
+let detectedRemoteOs = { name: 'Linux', icon: 'fa-brands fa-linux', shell: 'bash' };
+
+function updateTerminalDimensions() {
+  const termOutput = document.getElementById('terminalOutput');
+  if (!termOutput) return;
+
+  const rect = termOutput.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return;
+
+  // Compute monospace columns & rows based on current font size
+  const fontSize = currentTermFontSize || 12;
+  const charWidth = fontSize * 0.605;
+  const lineHeight = fontSize * 1.55;
+
+  const cols = Math.max(20, Math.floor((rect.width - 24) / charWidth));
+  const rows = Math.max(5, Math.floor((rect.height - 16) / lineHeight));
+
+  const floatBadge = document.getElementById('floatingTermDimsBadge');
+  const dockedBadge = document.getElementById('dockedTermDimsBadge');
+
+  if (floatBadge) floatBadge.innerHTML = `${cols}&times;${rows}`;
+  if (dockedBadge) dockedBadge.innerHTML = `${cols}&times;${rows}`;
+}
+
+async function detectRemoteEnvironment() {
+  if (!isConnected) return;
+  try {
+    const res = await fetch('/api/exec', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: 'echo "__SYS_INFO__"; uname -s; uname -r; echo "$SHELL"' }),
+    });
+    const data = await res.json();
+    if (data.stdout && data.stdout.includes('__SYS_INFO__')) {
+      const parts = data.stdout.split('\n').filter(Boolean);
+      const idx = parts.findIndex(p => p.includes('__SYS_INFO__'));
+      const sysName = (parts[idx + 1] || '').trim();
+      const sysKernel = (parts[idx + 2] || '').trim();
+      const shellPath = (parts[idx + 3] || '').trim();
+      const shellName = shellPath ? shellPath.split('/').pop() : 'bash';
+
+      let osIcon = 'fa-brands fa-linux';
+      let osLabel = 'Linux';
+
+      if (/darwin/i.test(sysName)) {
+        osIcon = 'fa-brands fa-apple';
+        osLabel = 'macOS';
+      } else if (/freebsd|openbsd|netbsd/i.test(sysName)) {
+        osIcon = 'fa-solid fa-server';
+        osLabel = 'BSD';
+      } else if (/cygwin|mingw|msys|windows/i.test(sysName)) {
+        osIcon = 'fa-brands fa-windows';
+        osLabel = 'Windows';
+      } else {
+        osIcon = 'fa-brands fa-linux';
+        osLabel = 'Linux';
+      }
+
+      detectedRemoteOs = { name: osLabel, icon: osIcon, shell: shellName };
+      applyDetectedOsUI();
+    }
+  } catch (_) {}
+}
+
+function applyDetectedOsUI() {
+  const floatingOsIcon = document.getElementById('floatingOsIcon');
+  const dockedOsIcon = document.getElementById('dockedOsIcon');
+  const dockedOsText = document.getElementById('dockedOsText');
+  const floatingTermTitleText = document.getElementById('floatingTermTitleText');
+
+  if (floatingOsIcon) floatingOsIcon.className = detectedRemoteOs.icon;
+  if (dockedOsIcon) dockedOsIcon.className = detectedRemoteOs.icon;
+  if (dockedOsText) dockedOsText.innerText = detectedRemoteOs.name;
+
+  if (isConnected && floatingTermTitleText) {
+    const hostVal = document.getElementById('sshHost').value.trim();
+    const userVal = document.getElementById('sshUser').value.trim();
+    floatingTermTitleText.innerText = `${userVal}@${hostVal}: ~ (${detectedRemoteOs.shell})`;
+  }
+
+  updateTerminalDimensions();
+}
+
 function toggleDetachTerminal() {
   if (isTerminalDetached) {
     dockTerminal();
@@ -2184,13 +3469,14 @@ function detachTerminal() {
     dockTabTerminal.innerHTML = `
       <div class="terminal-detached-placeholder">
         <i class="fa-solid fa-up-right-from-square"></i>
-        <p>SSH Terminal is currently detached into a floating window.</p>
+        <p>SSH Terminal is currently detached into a floating macOS-style window.</p>
         <button class="btn-mini btn-dock-back" onclick="dockTerminal()"><i class="fa-solid fa-down-left-and-up-right-to-center"></i> Return / Dock Back</button>
       </div>
     `;
   }
 
-  showToast('info', 'Terminal detached into floating window');
+  setTimeout(updateTerminalDimensions, 50);
+  showToast('info', 'Terminal detached into macOS-style floating window');
 }
 
 function dockTerminal() {
@@ -2211,6 +3497,7 @@ function dockTerminal() {
   if (detachLabel) detachLabel.innerText = 'Detach';
 
   switchDockTab('terminal');
+  setTimeout(updateTerminalDimensions, 50);
   showToast('info', 'Terminal returned to bottom dock');
 }
 
@@ -2223,8 +3510,10 @@ function maximizeFloatingTerminal() {
   floatingWindow.classList.toggle('maximized', isTerminalMaximized);
 
   if (btnMax) {
-    btnMax.innerHTML = isTerminalMaximized ? '<i class="fa-solid fa-compress"></i>' : '<i class="fa-solid fa-expand"></i>';
+    btnMax.querySelector('.mac-dot-symbol').innerHTML = isTerminalMaximized ? '&#x2921;' : '&#x2922;';
   }
+
+  setTimeout(updateTerminalDimensions, 50);
 }
 
 function minimizeFloatingTerminal() {
@@ -2233,6 +3522,7 @@ function minimizeFloatingTerminal() {
 
   isTerminalMinimized = !isTerminalMinimized;
   floatingWindow.classList.toggle('minimized', isTerminalMinimized);
+  setTimeout(updateTerminalDimensions, 50);
 }
 
 function initFloatingWindowDrag() {
@@ -2269,6 +3559,7 @@ function initFloatingWindowDrag() {
     if (isDragging) {
       isDragging = false;
       document.body.style.userSelect = '';
+      updateTerminalDimensions();
     }
   });
 
@@ -2292,8 +3583,9 @@ function initFloatingWindowDrag() {
       if (isResizing) {
         const deltaW = e.clientX - rStartX;
         const deltaH = e.clientY - rStartY;
-        win.style.width = `${Math.max(440, initialW + deltaW)}px`;
-        win.style.height = `${Math.max(260, initialH + deltaH)}px`;
+        win.style.width = `${Math.max(460, initialW + deltaW)}px`;
+        win.style.height = `${Math.max(280, initialH + deltaH)}px`;
+        updateTerminalDimensions();
       }
     });
 
@@ -2301,6 +3593,7 @@ function initFloatingWindowDrag() {
       if (isResizing) {
         isResizing = false;
         document.body.style.userSelect = '';
+        updateTerminalDimensions();
       }
     });
   }
@@ -2394,6 +3687,9 @@ function switchDockTab(tab) {
   document.getElementById('dockBtnTerminal').classList.toggle('active', tab === 'terminal');
   document.getElementById('dockTabTransfers').classList.toggle('active', tab === 'transfers');
   document.getElementById('dockTabTerminal').classList.toggle('active', tab === 'terminal');
+  if (tab === 'terminal') {
+    setTimeout(updateTerminalDimensions, 40);
+  }
 }
 
 function formatFileDate(dateVal) {

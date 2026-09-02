@@ -299,20 +299,30 @@ export class TransferManager extends EventEmitter {
         task.markStarted(stats.size);
         this.emit('progress', task);
 
+        let lastEmitTime = 0;
         await this.sftpService.uploadFile(task.localPath, task.remotePath, (transferred, total) => {
           if (task.status === 'cancelled') return;
           task.updateProgress(transferred, total);
-          this.emit('progress', task);
+          const now = Date.now();
+          if (now - lastEmitTime >= 120 || transferred === total) {
+            lastEmitTime = now;
+            this.emit('progress', task);
+          }
         });
       } else {
         const remoteStat = await this.sftpService.stat(task.remotePath);
         task.markStarted(remoteStat.size);
         this.emit('progress', task);
 
+        let lastEmitTime = 0;
         await this.sftpService.downloadFile(task.remotePath, task.localPath, (transferred, total) => {
           if (task.status === 'cancelled') return;
           task.updateProgress(transferred, total);
-          this.emit('progress', task);
+          const now = Date.now();
+          if (now - lastEmitTime >= 120 || transferred === total) {
+            lastEmitTime = now;
+            this.emit('progress', task);
+          }
         });
       }
 

@@ -36,4 +36,5 @@ Thumbs.db
 
 # Temporary / Log files
 *.log
+*.py
 scratch/
