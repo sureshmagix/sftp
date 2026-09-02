@@ -7,6 +7,7 @@ export interface SshConnectConfig {
   password?: string;
   privateKey?: string | Buffer;
   passphrase?: string;
+  hostFingerprint?: string;
   keepaliveInterval?: number;
   readyTimeout?: number;
   algorithms?: Ssh2ConnectConfig['algorithms'];
@@ -29,7 +30,7 @@ export interface FileItem {
 
 export type TransferDirection = 'upload' | 'download';
 
-export type TaskStatus = 'queued' | 'transferring' | 'paused' | 'completed' | 'failed' | 'cancelled';
+export type TaskStatus = 'queued' | 'transferring' | 'cancelling' | 'paused' | 'completed' | 'failed' | 'cancelled';
 
 export interface TransferProgress {
   id: string;

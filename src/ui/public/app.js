@@ -123,6 +123,7 @@ const DEFAULT_PROFILES = [
     username: 'ubuntu',
     password: '',
     keyPath: '',
+    hostFingerprint: '',
     rememberPassword: true,
   },
   {
@@ -133,12 +134,50 @@ const DEFAULT_PROFILES = [
     username: 'root',
     password: '',
     keyPath: '',
+    hostFingerprint: '',
     rememberPassword: true,
   },
 ];
 
 let savedClients = [];
 let activeClientId = 'client-remote';
+
+function sanitizeClientProfile(profile, index = 0, keepSessionPassword = false) {
+  if (!profile || typeof profile !== 'object') return null;
+  const host = typeof profile.host === 'string' ? profile.host.trim().slice(0, 255) : '';
+  if (!host) return null;
+
+  const rawId = typeof profile.id === 'string' ? profile.id : '';
+  const id = /^[a-zA-Z0-9_-]{1,80}$/.test(rawId)
+    ? rawId
+    : `client-${Date.now()}-${index}`;
+  const parsedPort = Number(profile.port);
+  const port = Number.isInteger(parsedPort) && parsedPort >= 1 && parsedPort <= 65535 ? parsedPort : 22;
+
+  return {
+    id,
+    name: typeof profile.name === 'string' && profile.name.trim()
+      ? profile.name.trim().slice(0, 120)
+      : 'Remote Server',
+    host,
+    port,
+    username: typeof profile.username === 'string' && profile.username.trim()
+      ? profile.username.trim().slice(0, 128)
+      : 'ubuntu',
+    password: keepSessionPassword && typeof profile.password === 'string' ? profile.password : '',
+    keyPath: typeof profile.keyPath === 'string' ? profile.keyPath.slice(0, 2048) : '',
+    hostFingerprint: typeof profile.hostFingerprint === 'string' ? profile.hostFingerprint.trim().slice(0, 128) : '',
+    rememberPassword: false,
+  };
+}
+
+function sanitizeClientProfiles(profiles, keepSessionPasswords = false) {
+  if (!Array.isArray(profiles)) return [];
+  return profiles
+    .slice(0, 100)
+    .map((profile, index) => sanitizeClientProfile(profile, index, keepSessionPasswords))
+    .filter(Boolean);
+}
 
 // Initialize Application
 document.addEventListener('DOMContentLoaded', () => {
@@ -332,7 +371,7 @@ function initClientProfiles() {
   const stored = localStorage.getItem('sftp_client_profiles');
   if (stored) {
     try {
-      savedClients = JSON.parse(stored);
+      savedClients = sanitizeClientProfiles(JSON.parse(stored));
     } catch (e) {
       savedClients = [...DEFAULT_PROFILES];
     }
@@ -340,6 +379,10 @@ function initClientProfiles() {
     savedClients = [...DEFAULT_PROFILES];
     saveClientsToStorage();
   }
+
+  if (savedClients.length === 0) savedClients = [...DEFAULT_PROFILES];
+  // Rewrite legacy records immediately so previously persisted passwords are purged.
+  saveClientsToStorage();
 
   const storedActive = localStorage.getItem('sftp_active_client_id');
   if (storedActive && savedClients.some(c => c.id === storedActive)) {
@@ -353,7 +396,11 @@ function initClientProfiles() {
 }
 
 function saveClientsToStorage() {
-  localStorage.setItem('sftp_client_profiles', JSON.stringify(savedClients));
+  const profilesWithoutSecrets = savedClients.map(({ password: _password, ...client }) => ({
+    ...client,
+    rememberPassword: false,
+  }));
+  localStorage.setItem('sftp_client_profiles', JSON.stringify(profilesWithoutSecrets));
 }
 
 function populateClientDropdown() {
@@ -388,6 +435,7 @@ function applyClientToForm(clientId) {
   document.getElementById('sshPort').value = client.port || 22;
   document.getElementById('sshUser').value = client.username || '';
   document.getElementById('sshKeyPath').value = client.keyPath || '';
+  document.getElementById('sshFingerprint').value = client.hostFingerprint || '';
 
   const rememberCheck = document.getElementById('rememberPasswordCheck');
   if (rememberCheck) {
@@ -413,6 +461,7 @@ function saveCurrentProfilePrompt() {
   const username = document.getElementById('sshUser').value.trim();
   const password = document.getElementById('sshPassword').value;
   const keyPath = document.getElementById('sshKeyPath').value.trim();
+  const hostFingerprint = document.getElementById('sshFingerprint').value.trim();
   const remember = document.getElementById('rememberPasswordCheck').checked;
 
   if (!currentClient) {
@@ -424,6 +473,7 @@ function saveCurrentProfilePrompt() {
   currentClient.port = port;
   currentClient.username = username;
   currentClient.keyPath = keyPath;
+  currentClient.hostFingerprint = hostFingerprint;
   currentClient.rememberPassword = remember;
   currentClient.password = remember ? password : '';
 
@@ -469,9 +519,10 @@ function renderClientsList() {
           <div><i class="fa-solid fa-user"></i> User: <strong>${escapeHtml(client.username)}</strong></div>
           <div>
             <i class="fa-solid fa-lock"></i> Password: 
-            ${hasPass ? '<span style="color: var(--accent-emerald);">Saved (Remembered)</span>' : '<span style="color: var(--text-dim);">Prompt on connect</span>'}
+            ${hasPass ? '<span style="color: var(--accent-emerald);">Available for this session</span>' : '<span style="color: var(--text-dim);">Prompt on connect</span>'}
           </div>
           ${client.keyPath ? `<div><i class="fa-solid fa-key"></i> Key: <code>${escapeHtml(client.keyPath)}</code></div>` : ''}
+          ${client.hostFingerprint ? `<div><i class="fa-solid fa-shield-halved"></i> Host: <code>${escapeHtml(client.hostFingerprint)}</code></div>` : ''}
         </div>
         <div class="client-card-footer">
           <button class="btn btn-connect btn-sm" onclick="connectToClient('${client.id}')">
@@ -499,6 +550,7 @@ function showNewClientForm() {
   document.getElementById('editClientUser').value = 'ubuntu';
   document.getElementById('editClientPassword').value = '';
   document.getElementById('editClientKeyPath').value = '';
+  document.getElementById('editClientFingerprint').value = '';
   document.getElementById('clientEditForm').style.display = 'block';
   document.getElementById('clientEditForm').scrollIntoView({ behavior: 'smooth' });
 }
@@ -519,6 +571,7 @@ function editClientProfile(id) {
   document.getElementById('editClientUser').value = client.username;
   document.getElementById('editClientPassword').value = client.password || '';
   document.getElementById('editClientKeyPath').value = client.keyPath || '';
+  document.getElementById('editClientFingerprint').value = client.hostFingerprint || '';
   document.getElementById('clientEditForm').style.display = 'block';
   document.getElementById('clientEditForm').scrollIntoView({ behavior: 'smooth' });
 }
@@ -531,6 +584,7 @@ function saveClientFromForm() {
   const username = document.getElementById('editClientUser').value.trim() || 'ubuntu';
   const password = document.getElementById('editClientPassword').value;
   const keyPath = document.getElementById('editClientKeyPath').value.trim();
+  const hostFingerprint = document.getElementById('editClientFingerprint').value.trim();
 
   if (!host) {
     showToast('error', 'Please enter Remote Host / IP');
@@ -546,6 +600,7 @@ function saveClientFromForm() {
       existing.username = username;
       existing.password = password;
       existing.keyPath = keyPath;
+      existing.hostFingerprint = hostFingerprint;
       existing.rememberPassword = Boolean(password);
     }
   } else {
@@ -558,6 +613,7 @@ function saveClientFromForm() {
       username,
       password,
       keyPath,
+      hostFingerprint,
       rememberPassword: Boolean(password),
     });
     activeClientId = newId;
@@ -619,7 +675,11 @@ function connectToClient(id) {
 }
 
 function exportClientProfiles() {
-  const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(savedClients, null, 2));
+  const profilesWithoutSecrets = savedClients.map(({ password: _password, ...client }) => ({
+    ...client,
+    rememberPassword: false,
+  }));
+  const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(profilesWithoutSecrets, null, 2));
   const downloadAnchor = document.createElement('a');
   downloadAnchor.setAttribute('href', dataStr);
   downloadAnchor.setAttribute('download', `sb_sftp_clients_backup_${Date.now()}.json`);
@@ -640,15 +700,15 @@ function handleImportProfilesFile(event) {
   const reader = new FileReader();
   reader.onload = (e) => {
     try {
-      const imported = JSON.parse(e.target.result);
-      if (Array.isArray(imported) && imported.length > 0) {
+      const imported = sanitizeClientProfiles(JSON.parse(e.target.result));
+      if (imported.length > 0) {
         savedClients = imported;
         activeClientId = savedClients[0].id;
         saveClientsToStorage();
         populateClientDropdown();
         applyClientToForm(activeClientId);
         renderClientsList();
-        showToast('success', `Successfully imported ${imported.length} client profiles!`);
+        showToast('success', `Imported ${imported.length} profiles. Passwords were intentionally excluded.`);
       } else {
         showToast('error', 'Invalid JSON profile structure');
       }
@@ -1215,6 +1275,7 @@ async function handleConnect(event) {
   const username = document.getElementById('sshUser').value.trim();
   const password = document.getElementById('sshPassword').value;
   const privateKeyPath = document.getElementById('sshKeyPath').value.trim();
+  const hostFingerprint = document.getElementById('sshFingerprint').value.trim();
   const remember = document.getElementById('rememberPasswordCheck').checked;
 
   if (!host || !username) {
@@ -1233,6 +1294,7 @@ async function handleConnect(event) {
   if (currentClient) {
     currentClient.rememberPassword = remember;
     currentClient.password = remember ? password : '';
+    currentClient.hostFingerprint = hostFingerprint;
     saveClientsToStorage();
   }
 
@@ -1244,7 +1306,7 @@ async function handleConnect(event) {
     const res = await fetch('/api/connect', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ host, port, username, password, privateKeyPath }),
+      body: JSON.stringify({ host, port, username, password, privateKeyPath, hostFingerprint }),
     });
 
     const result = await res.json();
@@ -1259,6 +1321,12 @@ async function handleConnect(event) {
       appendTerminalMsg('stderr', `❌ Connection failed: ${result.error}`);
       showToast('error', result.error || 'Connection failed');
       updateConnectionUI('error');
+
+      const fingerprintMatch = (result.error || '').match(/SHA256:[a-zA-Z0-9+/]{43}={0,2}/);
+      if (fingerprintMatch && !hostFingerprint) {
+        document.getElementById('sshFingerprint').value = fingerprintMatch[0];
+        showToast('info', 'Server fingerprint detected. Verify it with the server administrator, then connect again.');
+      }
 
       // Enhanced feedback for incorrect password / auth failure
       if (result.isAuthError) {
@@ -2453,7 +2521,7 @@ function renderQuickAccessPopover() {
       { name: 'Downloads', path: localHomePath, icon: 'fa-download' }
     ];
     placesGrid.innerHTML = places.map(p => `
-      <div class="quick-place-chip" onclick="navigateFromQuickAccess('${escapeHtml(p.path)}')" title="${escapeHtml(p.path)}">
+      <div class="quick-place-chip" data-quick-path="${escapeHtml(p.path)}" title="${escapeHtml(p.path)}">
         <i class="fa-solid ${p.icon || 'fa-folder'}"></i>
         <span>${escapeHtml(p.name)}</span>
       </div>
@@ -2468,7 +2536,7 @@ function renderQuickAccessPopover() {
     } else {
       if (sectionFreq) sectionFreq.style.display = 'block';
       freqList.innerHTML = freqItems.map(item => `
-        <div class="quick-path-row" onclick="navigateFromQuickAccess('${escapeHtml(item.path)}')" title="${escapeHtml(item.path)}">
+        <div class="quick-path-row" data-quick-path="${escapeHtml(item.path)}" title="${escapeHtml(item.path)}">
           <div class="quick-path-info">
             <i class="fa-solid fa-folder"></i>
             <span class="quick-path-name">${escapeHtml(item.name)}</span>
@@ -2489,7 +2557,7 @@ function renderQuickAccessPopover() {
       recentList.innerHTML = recentItems.map(item => {
         const timeAgo = formatTimeAgo(item.lastAccessed);
         return `
-          <div class="quick-path-row" onclick="navigateFromQuickAccess('${escapeHtml(item.path)}')" title="${escapeHtml(item.path)}">
+          <div class="quick-path-row" data-quick-path="${escapeHtml(item.path)}" title="${escapeHtml(item.path)}">
             <div class="quick-path-info">
               <i class="fa-regular fa-clock"></i>
               <span class="quick-path-name">${escapeHtml(item.name)}</span>
@@ -2500,6 +2568,10 @@ function renderQuickAccessPopover() {
       }).join('');
     }
   }
+
+  document.querySelectorAll('[data-quick-path]').forEach((item) => {
+    item.addEventListener('click', () => navigateFromQuickAccess(item.getAttribute('data-quick-path')));
+  });
 }
 
 function formatTimeAgo(timestamp) {
@@ -3209,7 +3281,7 @@ async function fetchTransfers() {
 
 function renderTransfersList(tasks) {
   activeTransfersCache = tasks || [];
-  const activeTasks = activeTransfersCache.filter(t => t.status === 'transferring' || t.status === 'queued');
+  const activeTasks = activeTransfersCache.filter(t => ['transferring', 'queued', 'cancelling'].includes(t.status));
   const completedTasks = activeTransfersCache.filter(t => t.status === 'completed');
   const failedTasks = activeTransfersCache.filter(t => t.status === 'failed');
 
@@ -3251,6 +3323,8 @@ function renderTransfersList(tasks) {
     let statusHtml = `<strong>${task.status}</strong>`;
     if (task.status === 'transferring') {
       statusHtml = `<span style="color: var(--accent-cyan);"><i class="fa-solid fa-spinner fa-spin"></i> Transferring</span>`;
+    } else if (task.status === 'cancelling') {
+      statusHtml = `<span style="color: var(--accent-amber);"><i class="fa-solid fa-spinner fa-spin"></i> Cancelling…</span>`;
     } else if (task.status === 'completed') {
       statusHtml = `<span style="color: var(--accent-emerald);"><i class="fa-solid fa-circle-check"></i> Completed</span>`;
     } else if (task.status === 'failed') {
@@ -3260,7 +3334,7 @@ function renderTransfersList(tasks) {
     }
 
     return `
-      <tr class="${task.status === 'transferring' ? 'row-transferring' : ''}">
+      <tr class="${task.status === 'transferring' || task.status === 'cancelling' ? 'row-transferring' : ''}">
         <td><strong>${escapeHtml(task.fileName)}</strong></td>
         <td><span class="${badgeClass}">${dirIcon}</span></td>
         <td><code>${escapeHtml(task.localPath)}</code></td>
@@ -3278,6 +3352,8 @@ function renderTransfersList(tasks) {
         <td>
           ${task.status === 'transferring' || task.status === 'queued' ? `
             <button onclick="cancelTransfer('${task.id}')" class="btn-file-del" title="Cancel">Cancel</button>
+          ` : task.status === 'cancelling' ? `
+            <button class="btn-file-del" disabled title="Cancellation in progress">Cancelling…</button>
           ` : '--'}
         </td>
       </tr>
@@ -3337,13 +3413,23 @@ function updateTransferHud(activeTasks) {
 
 async function cancelTransfer(taskId) {
   try {
-    await fetch('/api/cancel-transfer', {
+    const res = await fetch('/api/cancel-transfer', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ taskId }),
     });
+    const result = await res.json();
+    if (!res.ok) {
+      showToast('error', result.error || 'Unable to cancel transfer');
+    } else if (result.result === 'cancellation-requested') {
+      showToast('info', 'Stopping transfer and removing the partial file…');
+    } else {
+      showToast('info', 'Queued transfer cancelled.');
+    }
     fetchTransfers();
-  } catch (err) {}
+  } catch (err) {
+    showToast('error', `Unable to cancel transfer: ${err.message}`);
+  }
 }
 
 async function clearCompletedTransfers() {

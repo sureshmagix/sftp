@@ -1,5 +1,6 @@
 import { EventEmitter } from 'events';
 import { Client as Ssh2Client, SFTPWrapper } from 'ssh2';
+import { createHash, timingSafeEqual } from 'crypto';
 import { ConnectionStatus, SshConnectConfig } from '../types';
 
 export class SshConnection extends EventEmitter {
@@ -32,7 +33,7 @@ export class SshConnection extends EventEmitter {
   }
 
   public async connect(config: SshConnectConfig): Promise<void> {
-    if (this.isConnected()) {
+    if (this.client) {
       await this.disconnect();
     }
 
@@ -41,12 +42,14 @@ export class SshConnection extends EventEmitter {
 
     return new Promise((resolve, reject) => {
       const client = new Ssh2Client();
+      this.client = client;
       let isSettled = false;
+      let observedFingerprint = '';
+      let fingerprintMatched = false;
 
       client.on('ready', () => {
         if (!isSettled) {
           isSettled = true;
-          this.client = client;
           this.setStatus('connected');
           this.emit('ready');
           resolve();
@@ -58,18 +61,31 @@ export class SshConnection extends EventEmitter {
       });
 
       client.on('error', (err) => {
-        this.setStatus('error', err);
-        this.emit('error', err);
+        let connectionError = err;
+        if (observedFingerprint && !config.hostFingerprint) {
+          connectionError = new Error(
+            `Host key verification required. Confirm the server fingerprint out-of-band, then enter: ${observedFingerprint}`
+          ) as any;
+        } else if (observedFingerprint && config.hostFingerprint && !fingerprintMatched) {
+          connectionError = new Error(
+            `Host key verification failed. Expected ${config.hostFingerprint}, received ${observedFingerprint}`
+          ) as any;
+        }
+
+        this.setStatus('error', connectionError);
+        this.emit('error', connectionError);
         if (!isSettled) {
           isSettled = true;
-          reject(err);
+          reject(connectionError);
         }
       });
 
       client.on('close', () => {
-        this.client = null;
-        this.sftpWrapper = null;
-        this.setStatus('disconnected');
+        if (this.client === client) {
+          this.client = null;
+          this.sftpWrapper = null;
+          this.setStatus('disconnected');
+        }
         this.emit('close');
         if (!isSettled) {
           isSettled = true;
@@ -88,6 +104,12 @@ export class SshConnection extends EventEmitter {
         username: config.username,
         readyTimeout: config.readyTimeout || 20000,
         keepaliveInterval: config.keepaliveInterval || 10000,
+        hostVerifier: (key: Buffer) => {
+          observedFingerprint = `SHA256:${createHash('sha256').update(key).digest('base64').replace(/=+$/, '')}`;
+          if (!config.hostFingerprint) return false;
+          fingerprintMatched = this.fingerprintsMatch(config.hostFingerprint, observedFingerprint);
+          return fingerprintMatched;
+        },
       };
 
       if (config.password) {
@@ -109,6 +131,8 @@ export class SshConnection extends EventEmitter {
       try {
         client.connect(fullConfig);
       } catch (err) {
+        isSettled = true;
+        if (this.client === client) this.client = null;
         this.setStatus('error', err as Error);
         reject(err);
       }
@@ -163,5 +187,12 @@ export class SshConnection extends EventEmitter {
     }
 
     this.setStatus('disconnected');
+  }
+
+  private fingerprintsMatch(expected: string, observed: string): boolean {
+    const normalize = (value: string) => value.trim().replace(/^SHA256:/i, '').replace(/=+$/, '');
+    const expectedBuffer = Buffer.from(normalize(expected));
+    const observedBuffer = Buffer.from(normalize(observed));
+    return expectedBuffer.length === observedBuffer.length && timingSafeEqual(expectedBuffer, observedBuffer);
   }
 }

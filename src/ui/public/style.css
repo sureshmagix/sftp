@@ -845,6 +845,7 @@ body {
 .field-user { width: 120px; }
 .field-pass { width: 150px; }
 .field-key { flex: 1.5; min-width: 140px; }
+.field-fingerprint { flex: 1.6; min-width: 190px; }
 
 .input-with-icon {
   position: relative;
@@ -3635,5 +3636,4 @@ tr.row-transferring {
   display: flex;
   gap: 8px;
 }
-
 

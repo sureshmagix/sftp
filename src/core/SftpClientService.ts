@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { pipeline } from 'stream/promises';
 import { Stats, SFTPWrapper } from 'ssh2';
 import { SshConnection } from './SshConnection';
 import { FileItem, FileType } from '../types';
@@ -171,34 +172,32 @@ export class SftpClientService {
   public async uploadFile(
     localPath: string,
     remotePath: string,
-    onProgress?: (transferred: number, total: number) => void
+    onProgress?: (transferred: number, total: number) => void,
+    signal?: AbortSignal
   ): Promise<void> {
     const sftp = await this.getSftp();
     const stats = await fs.promises.stat(localPath);
     const totalSize = stats.size;
+    const readStream = fs.createReadStream(localPath);
+    const writeStream = sftp.createWriteStream(remotePath);
+    let transferred = 0;
 
-    return new Promise((resolve, reject) => {
-      sftp.fastPut(
-        localPath,
-        remotePath,
-        {
-          step: (totalTransferred, chunk, total) => {
-            if (onProgress) {
-              onProgress(totalTransferred, totalSize || total);
-            }
-          },
-        },
-        (err) => {
-          if (err) {
-            return reject(new Error(`Upload failed for '${localPath}' -> '${remotePath}': ${err.message}`));
-          }
-          if (onProgress && totalSize === 0) {
-            onProgress(0, 0);
-          }
-          resolve();
-        }
-      );
+    readStream.on('data', (chunk: Buffer) => {
+      transferred += chunk.length;
+      onProgress?.(transferred, totalSize);
     });
+
+    try {
+      await pipeline(readStream, writeStream, { signal });
+      onProgress?.(totalSize, totalSize);
+    } catch (err: any) {
+      if (signal?.aborted || err?.name === 'AbortError') {
+        const abortError = new Error('Upload cancelled');
+        abortError.name = 'AbortError';
+        throw abortError;
+      }
+      throw new Error(`Upload failed for '${localPath}' -> '${remotePath}': ${err.message}`);
+    }
   }
 
   /**
@@ -208,40 +207,32 @@ export class SftpClientService {
     stream: NodeJS.ReadableStream,
     remotePath: string,
     totalSize?: number,
-    onProgress?: (transferred: number, total: number) => void
+    onProgress?: (transferred: number, total: number) => void,
+    signal?: AbortSignal
   ): Promise<void> {
     const sftp = await this.getSftp();
     const dir = path.posix.dirname(remotePath);
     await this.mkdir(dir, true);
 
-    return new Promise((resolve, reject) => {
-      const writeStream = sftp.createWriteStream(remotePath);
-      let transferred = 0;
+    const writeStream = sftp.createWriteStream(remotePath);
+    let transferred = 0;
 
-      stream.on('data', (chunk: Buffer) => {
-        transferred += chunk.length;
-        if (onProgress) {
-          onProgress(transferred, totalSize || transferred);
-        }
-      });
-
-      stream.on('error', (err: any) => {
-        reject(new Error(`Stream error during upload to '${remotePath}': ${err.message}`));
-      });
-
-      writeStream.on('error', (err: any) => {
-        reject(new Error(`Write error for '${remotePath}': ${err.message}`));
-      });
-
-      writeStream.on('close', () => {
-        if (onProgress && totalSize !== undefined) {
-          onProgress(transferred, totalSize);
-        }
-        resolve();
-      });
-
-      stream.pipe(writeStream);
+    stream.on('data', (chunk: Buffer) => {
+      transferred += chunk.length;
+      onProgress?.(transferred, totalSize || transferred);
     });
+
+    try {
+      await pipeline(stream, writeStream, { signal });
+      onProgress?.(transferred, totalSize ?? transferred);
+    } catch (err: any) {
+      if (signal?.aborted || err?.name === 'AbortError') {
+        const abortError = new Error('Upload cancelled');
+        abortError.name = 'AbortError';
+        throw abortError;
+      }
+      throw new Error(`Stream upload failed for '${remotePath}': ${err.message}`);
+    }
   }
 
   /**
@@ -252,7 +243,7 @@ export class SftpClientService {
     return new Promise((resolve, reject) => {
       const chunks: Buffer[] = [];
       let total = 0;
-      const readStream = sftp.createReadStream(remotePath, { start: 0, end: maxBytes });
+      const readStream = sftp.createReadStream(remotePath, { start: 0, end: Math.max(0, maxBytes - 1) });
 
       readStream.on('data', (chunk: Buffer) => {
         chunks.push(chunk);
@@ -275,7 +266,8 @@ export class SftpClientService {
   public async downloadFile(
     remotePath: string,
     localPath: string,
-    onProgress?: (transferred: number, total: number) => void
+    onProgress?: (transferred: number, total: number) => void,
+    signal?: AbortSignal
   ): Promise<void> {
     const sftp = await this.getSftp();
     const remoteStat = await this.stat(remotePath);
@@ -285,28 +277,26 @@ export class SftpClientService {
     const dir = path.dirname(localPath);
     await fs.promises.mkdir(dir, { recursive: true });
 
-    return new Promise((resolve, reject) => {
-      sftp.fastGet(
-        remotePath,
-        localPath,
-        {
-          step: (totalTransferred, chunk, total) => {
-            if (onProgress) {
-              onProgress(totalTransferred, totalSize || total);
-            }
-          },
-        },
-        (err) => {
-          if (err) {
-            return reject(new Error(`Download failed for '${remotePath}' -> '${localPath}': ${err.message}`));
-          }
-          if (onProgress && totalSize === 0) {
-            onProgress(0, 0);
-          }
-          resolve();
-        }
-      );
+    const readStream = sftp.createReadStream(remotePath);
+    const writeStream = fs.createWriteStream(localPath);
+    let transferred = 0;
+
+    readStream.on('data', (chunk: Buffer) => {
+      transferred += chunk.length;
+      onProgress?.(transferred, totalSize);
     });
+
+    try {
+      await pipeline(readStream, writeStream, { signal });
+      onProgress?.(totalSize, totalSize);
+    } catch (err: any) {
+      if (signal?.aborted || err?.name === 'AbortError') {
+        const abortError = new Error('Download cancelled');
+        abortError.name = 'AbortError';
+        throw abortError;
+      }
+      throw new Error(`Download failed for '${remotePath}' -> '${localPath}': ${err.message}`);
+    }
   }
 
   /**

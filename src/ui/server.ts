@@ -6,6 +6,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { exec } from 'child_process';
+import { randomBytes, timingSafeEqual } from 'crypto';
 import { SftpAppController } from '../electron-bridge/ipcHandlers';
 import { SshConnectConfig } from '../types';
 
@@ -19,7 +20,11 @@ function openBrowser(url: string): void {
   exec(startCmd, () => {});
 }
 
-async function findAvailablePort(startPort: number = 3000, maxTries: number = 200): Promise<number> {
+async function findAvailablePort(
+  startPort: number = 3000,
+  maxTries: number = 200,
+  host: string = '127.0.0.1'
+): Promise<number> {
   for (let p = startPort; p < startPort + maxTries; p++) {
     const isAvailable = await new Promise<boolean>((resolve) => {
       const tester = net
@@ -34,11 +39,11 @@ async function findAvailablePort(startPort: number = 3000, maxTries: number = 20
         .once('listening', () => {
           tester.close(() => resolve(true));
         })
-        .listen(p, '127.0.0.1');
+        .listen(p, host);
     });
     if (isAvailable) return p;
   }
-  return startPort;
+  throw new Error(`No available port found between ${startPort} and ${startPort + maxTries - 1}`);
 }
 
 export class SftpWebServer {
@@ -47,11 +52,16 @@ export class SftpWebServer {
   private wss: WebSocketServer;
   private controller = new SftpAppController();
   private port: number;
+  private readonly sessionToken = randomBytes(32).toString('hex');
+  private readonly allowLan = process.env.SFTP_ALLOW_LAN === 'true';
+  private readonly bindHost: string;
+  private started = false;
 
   constructor(port: number = 3000) {
     this.port = port;
+    this.bindHost = this.allowLan ? process.env.SFTP_BIND_HOST || '0.0.0.0' : '127.0.0.1';
     this.server = http.createServer(this.app);
-    this.wss = new WebSocketServer({ server: this.server, path: '/ws' });
+    this.wss = this.createWebSocketServer(this.server);
     this.controller.sshConnection.on('error', (err) => {
       console.warn(`[SftpWebServer] SSH connection notice: ${err?.message || err}`);
     });
@@ -60,8 +70,78 @@ export class SftpWebServer {
     this.configureWebSocket();
   }
 
+  private createWebSocketServer(server: http.Server): WebSocketServer {
+    const wss = new WebSocketServer({
+      server,
+      path: '/ws',
+      verifyClient: ({ req }, done) => {
+        done(this.isRequestAuthenticated(req) && this.isTrustedOrigin(req));
+      },
+    });
+    wss.on('error', (err) => {
+      console.warn(`[SftpWebServer] WebSocket server notice: ${err.message}`);
+    });
+    return wss;
+  }
+
   private configureMiddleware() {
-    this.app.use(express.json());
+    this.app.disable('x-powered-by');
+    this.app.use((req, res, next) => {
+      if (req.path === '/' || req.path === '/index.html' || req.path.startsWith('/api/')) {
+        res.setHeader('Cache-Control', 'no-store');
+      }
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('X-Frame-Options', 'DENY');
+      res.setHeader('Referrer-Policy', 'no-referrer');
+      res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=(), usb=()');
+      res.setHeader(
+        'Content-Security-Policy',
+        "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'; " +
+          "script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://fonts.googleapis.com; " +
+          "font-src 'self' https://cdnjs.cloudflare.com https://fonts.gstatic.com data:; img-src 'self' data:; connect-src 'self' ws: wss:"
+      );
+      next();
+    });
+    this.app.use(express.json({ limit: '1mb' }));
+
+    this.app.use((req, res, next) => {
+      const isIndexRequest = req.path === '/' || req.path === '/index.html';
+      if (req.path === '/' && req.query.sessionToken === this.sessionToken) {
+        res.setHeader(
+          'Set-Cookie',
+          `sb_sftp_session=${this.sessionToken}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200`
+        );
+        return res.redirect(302, '/');
+      }
+
+      if (isIndexRequest && !this.isRequestAuthenticated(req)) {
+        return res
+          .status(401)
+          .type('text/plain')
+          .send('Unauthorized. Launch SB SFTP Studio from the desktop application or the secure URL printed by the server.');
+      }
+
+      if (req.path.startsWith('/api/')) {
+        if (!this.isTrustedOrigin(req)) {
+          return res.status(403).json({ success: false, error: 'Untrusted request origin' });
+        }
+        if (!this.isRequestAuthenticated(req)) {
+          return res.status(401).json({ success: false, error: 'Unauthorized' });
+        }
+        const hasRequestBody = Number(req.headers['content-length'] || 0) > 0;
+        if (
+          req.method !== 'GET' &&
+          req.path !== '/api/upload-stream' &&
+          hasRequestBody &&
+          !req.is('application/json')
+        ) {
+          return res.status(415).json({ success: false, error: 'JSON request body required' });
+        }
+      }
+
+      next();
+    });
+
     // Serve UI static files with fallback for packaged Electron apps
     let publicPath = path.join(__dirname, 'public');
     if (!fs.existsSync(publicPath)) {
@@ -74,6 +154,40 @@ export class SftpWebServer {
       publicPath = path.join((process as any).resourcesPath, 'public');
     }
     this.app.use(express.static(publicPath));
+  }
+
+  private isRequestAuthenticated(req: Pick<Request, 'headers'> | http.IncomingMessage): boolean {
+    const headerToken = req.headers['x-sb-sftp-token'];
+    const tokenFromHeader = Array.isArray(headerToken) ? headerToken[0] : headerToken;
+    const cookies = this.parseCookies(req.headers.cookie || '');
+    const suppliedToken = tokenFromHeader || cookies.sb_sftp_session;
+    if (!suppliedToken) return false;
+
+    const expected = Buffer.from(this.sessionToken);
+    const supplied = Buffer.from(suppliedToken);
+    return expected.length === supplied.length && timingSafeEqual(expected, supplied);
+  }
+
+  private parseCookies(cookieHeader: string): Record<string, string> {
+    const cookies: Record<string, string> = {};
+    for (const part of cookieHeader.split(';')) {
+      const separator = part.indexOf('=');
+      if (separator === -1) continue;
+      const key = part.slice(0, separator).trim();
+      const value = part.slice(separator + 1).trim();
+      if (key) cookies[key] = value;
+    }
+    return cookies;
+  }
+
+  private isTrustedOrigin(req: Pick<Request, 'headers'> | http.IncomingMessage): boolean {
+    const origin = req.headers.origin;
+    if (!origin) return true;
+    try {
+      return new URL(origin).host === req.headers.host;
+    } catch {
+      return false;
+    }
   }
 
   private configureRoutes() {
@@ -97,15 +211,20 @@ export class SftpWebServer {
         }
       }
 
-      const primaryIp = ipList.find((i) => !i.internal)?.address || '127.0.0.1';
+      const visibleIps = this.allowLan ? ipList : ipList.filter((item) => item.internal);
+      const primaryIp = this.allowLan
+        ? ipList.find((i) => !i.internal)?.address || '127.0.0.1'
+        : '127.0.0.1';
 
       res.json({
         hostname: os.hostname(),
         platform: os.platform(),
         arch: os.arch(),
         currentPort: this.port,
+        bindHost: this.bindHost,
+        lanAccessEnabled: this.allowLan,
         primaryIp,
-        ipAddresses: ipList,
+        ipAddresses: visibleIps,
       });
     });
 
@@ -131,20 +250,22 @@ export class SftpWebServer {
       }
 
       const oldPort = this.port;
-      // Send successful response first so the client receives it before server port switches
-      res.json({
-        success: true,
-        oldPort,
-        newPort: portNum,
-        redirectUrl: `http://localhost:${portNum}`,
-      });
-
-      // Switch port on next tick
-      setTimeout(() => {
-        this.changePort(portNum).catch((err) => {
-          console.error(`Failed to change server port to ${portNum}:`, err.message);
+      try {
+        await this.changePort(portNum);
+        res.json({
+          success: true,
+          oldPort,
+          newPort: portNum,
+          redirectUrl: `http://127.0.0.1:${portNum}`,
         });
-      }, 150);
+      } catch (err: any) {
+        res.status(409).json({
+          success: false,
+          oldPort,
+          newPort: portNum,
+          error: `Unable to switch ports: ${err.message}`,
+        });
+      }
     });
 
     // SSH Connection Status
@@ -154,7 +275,20 @@ export class SftpWebServer {
 
     // SSH Connect
     this.app.post('/api/connect', async (req: Request, res: Response) => {
-      const { host, port, username, password, privateKeyPath, passphrase } = req.body;
+      const { host, port, username, password, privateKeyPath, passphrase, hostFingerprint } = req.body;
+      const portNumber = port ? Number(port) : 22;
+      if (typeof host !== 'string' || !host.trim() || host.length > 255) {
+        return res.status(400).json({ success: false, error: 'A valid SSH host is required' });
+      }
+      if (typeof username !== 'string' || !username.trim() || username.length > 128) {
+        return res.status(400).json({ success: false, error: 'A valid SSH username is required' });
+      }
+      if (!Number.isInteger(portNumber) || portNumber < 1 || portNumber > 65535) {
+        return res.status(400).json({ success: false, error: 'SSH port must be between 1 and 65535' });
+      }
+      if (hostFingerprint && !/^SHA256:[a-zA-Z0-9+/]{43}={0,2}$/.test(hostFingerprint.trim())) {
+        return res.status(400).json({ success: false, error: 'Host fingerprint must use SHA256:base64 format' });
+      }
       try {
         let privateKey: Buffer | undefined = undefined;
         if (privateKeyPath && fs.existsSync(privateKeyPath)) {
@@ -163,11 +297,12 @@ export class SftpWebServer {
 
         const config: SshConnectConfig = {
           host,
-          port: port ? parseInt(port, 10) : 22,
+          port: portNumber,
           username,
           password: password || undefined,
           privateKey,
           passphrase: passphrase || undefined,
+          hostFingerprint: hostFingerprint?.trim() || undefined,
         };
 
         await this.controller.sshConnection.connect(config);
@@ -200,13 +335,15 @@ export class SftpWebServer {
           formattedError = `Host Unreachable: Network route to ${host} not found.`;
         }
 
-        res.status(400).json({ success: false, error: formattedError, isAuthError, rawError });
+        res.status(400).json({ success: false, error: formattedError, isAuthError });
       }
     });
 
     // SSH Disconnect
     this.app.post('/api/disconnect', async (_req: Request, res: Response) => {
       try {
+        this.controller.transferManager.cancelAll();
+        await this.controller.transferManager.waitForIdle();
         await this.controller.sshConnection.disconnect();
         res.json({ success: true });
       } catch (err: any) {
@@ -341,7 +478,7 @@ export class SftpWebServer {
           return res.status(400).json({ error: 'File exceeds 10MB preview limit' });
         }
 
-        const buffer = await this.controller.sftpService.readFile(remotePath, 5 * 1024 * 1024);
+        const buffer = await this.controller.sftpService.readFile(remotePath, 10 * 1024 * 1024);
         if (isImage) {
           const mime = ext === '.svg' ? 'image/svg+xml' : `image/${ext.replace('.', '')}`;
           const base64 = `data:${mime};base64,${buffer.toString('base64')}`;
@@ -587,8 +724,18 @@ export class SftpWebServer {
     // Transfer Queue: Cancel task
     this.app.post('/api/cancel-transfer', (req: Request, res: Response) => {
       const { taskId } = req.body;
-      this.controller.transferManager.cancelTask(taskId);
-      res.json({ success: true });
+      if (typeof taskId !== 'string' || !taskId) {
+        return res.status(400).json({ success: false, error: 'taskId is required' });
+      }
+
+      const result = this.controller.transferManager.cancelTask(taskId);
+      if (result === 'not-found') {
+        return res.status(404).json({ success: false, result, error: 'Transfer task not found' });
+      }
+      if (result === 'already-finished') {
+        return res.status(409).json({ success: false, result, error: 'Transfer has already finished' });
+      }
+      res.status(result === 'cancellation-requested' ? 202 : 200).json({ success: true, result });
     });
 
     // Direct Browser File/Folder Stream Upload
@@ -600,10 +747,14 @@ export class SftpWebServer {
         return res.status(400).json({ success: false, error: 'remotePath query parameter is required' });
       }
 
+      const controller = new AbortController();
+      req.once('aborted', () => controller.abort());
+
       try {
-        await this.controller.sftpService.uploadStream(req, remotePath, contentLength);
+        await this.controller.sftpService.uploadStream(req, remotePath, contentLength, undefined, controller.signal);
         res.json({ success: true, remotePath });
       } catch (err: any) {
+        if (controller.signal.aborted || err?.name === 'AbortError') return;
         res.status(500).json({ success: false, error: err.message });
       }
     });
@@ -611,6 +762,9 @@ export class SftpWebServer {
     // SSH Command Exec
     this.app.post('/api/exec', async (req: Request, res: Response) => {
       const { command } = req.body;
+      if (typeof command !== 'string' || !command.trim() || command.length > 32_768) {
+        return res.status(400).json({ error: 'A command between 1 and 32768 characters is required' });
+      }
       try {
         const result = await this.controller.terminalService.exec(command);
         res.json(result);
@@ -675,104 +829,91 @@ export class SftpWebServer {
   }
 
   public async changePort(newPort: number): Promise<void> {
-    return new Promise((resolve, reject) => {
-      // Terminate existing WS clients and close WS server
-      try {
-        this.wss.clients.forEach((client) => {
-          client.terminate();
-        });
-        this.wss.close();
-      } catch (e) {}
+    if (newPort === this.port) return;
 
-      // Close HTTP server and re-bind to new port
-      this.server.close((closeErr) => {
-        if (closeErr) {
-          console.warn('Notice when closing server:', closeErr.message);
-        }
+    const nextServer = http.createServer(this.app);
+    const nextWss = this.createWebSocketServer(nextServer);
 
-        this.port = newPort;
-        this.server = http.createServer(this.app);
-        this.wss = new WebSocketServer({ server: this.server, path: '/ws' });
-        this.configureWebSocket();
+    try {
+      await this.listen(nextServer, newPort);
+    } catch (err) {
+      nextWss.close();
+      if (nextServer.listening) nextServer.close();
+      throw err;
+    }
 
-        this.server.listen(this.port, () => {
-          console.log(`🚀 SFTP Web GUI Server port changed to ${this.port} (http://localhost:${this.port})`);
-          resolve();
-        }).on('error', (err) => {
-          reject(err);
-        });
-      });
+    const previousServer = this.server;
+    const previousWss = this.wss;
+    this.server = nextServer;
+    this.wss = nextWss;
+    this.port = newPort;
+    this.started = true;
+
+    previousWss.clients.forEach((client) => client.terminate());
+    previousWss.close();
+    previousServer.close((err) => {
+      if (err && (err as NodeJS.ErrnoException).code !== 'ERR_SERVER_NOT_RUNNING') {
+        console.warn('Notice when closing previous server:', err.message);
+      }
     });
+
+    console.log(`🚀 SFTP Web GUI Server port changed to ${this.port} (http://127.0.0.1:${this.port})`);
   }
 
   public getPort(): number {
     return this.port;
   }
 
+  public getLaunchUrl(): string {
+    return `http://127.0.0.1:${this.port}/?sessionToken=${encodeURIComponent(this.sessionToken)}`;
+  }
+
   public async stop(): Promise<void> {
-    return new Promise((resolve) => {
-      try {
-        this.wss.clients.forEach((client) => client.terminate());
-        this.wss.close();
-      } catch (_) {}
-      this.server.close(() => {
-        resolve();
-      });
-    });
+    this.controller.transferManager.cancelAll();
+    await this.controller.transferManager.waitForIdle();
+    await this.controller.sshConnection.disconnect().catch(() => {});
+    this.wss.clients.forEach((client) => client.terminate());
+    await new Promise<void>((resolve) => this.wss.close(() => resolve()));
+    if (this.server.listening) {
+      await new Promise<void>((resolve) => this.server.close(() => resolve()));
+    }
+    this.started = false;
   }
 
   public async start(autoOpenBrowser: boolean = true): Promise<void> {
-    const availablePort = await findAvailablePort(this.port);
+    if (this.started) return;
+    const availablePort = await findAvailablePort(this.port, 200, this.bindHost);
     this.port = availablePort;
-    return new Promise((resolve, reject) => {
-      const tryListen = () => {
-        this.server.removeAllListeners('error');
-        this.server.on('error', async (err: any) => {
-          if (err.code === 'EADDRINUSE') {
-            console.log(`Port ${this.port} is in use. Checking next available port (e.g. ${this.port} + 1)...`);
-            const nextFreePort = await findAvailablePort(this.port + 1);
-            this.port = nextFreePort;
-            try {
-              this.wss.close();
-            } catch (_) {}
-            try {
-              this.server.close();
-            } catch (_) {}
-            this.server = http.createServer(this.app);
-            this.wss = new WebSocketServer({ server: this.server, path: '/ws' });
-            this.configureWebSocket();
-            tryListen();
-          } else {
-            reject(err);
-          }
-        });
+    await this.listen(this.server, this.port);
+    this.started = true;
 
-        this.server.listen(this.port, () => {
-          const url = `http://localhost:${this.port}`;
-          console.log('=====================================================');
-          console.log(`🚀 SB SFTP Studio Server Running at ${url}`);
-          console.log('=====================================================');
+    const url = `http://127.0.0.1:${this.port}`;
+    console.log('=====================================================');
+    console.log(`🚀 SB SFTP Studio Server Running securely at ${url}`);
+    console.log(`🔒 Bound to ${this.bindHost}; LAN access ${this.allowLan ? 'enabled' : 'disabled'}`);
+    console.log('=====================================================');
 
-          if (autoOpenBrowser) {
-            openBrowser(url);
-          }
-          resolve();
-        });
+    if (autoOpenBrowser) {
+      openBrowser(this.getLaunchUrl());
+    }
+  }
+
+  private async listen(server: http.Server, port: number): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      const onError = (err: Error) => {
+        server.off('listening', onListening);
+        reject(err);
       };
-
-      tryListen();
+      const onListening = () => {
+        server.off('error', onError);
+        resolve();
+      };
+      server.once('error', onError);
+      server.once('listening', onListening);
+      server.listen(port, this.bindHost);
     });
   }
 }
-
-// Process-level safety guards to prevent server crashes from unexpected network dropouts
-process.on('unhandledRejection', (reason: any) => {
-  console.warn('[Process] Handled unhandled rejection:', reason?.message || reason);
-});
-
-process.on('uncaughtException', (err: Error) => {
-  console.warn('[Process] Handled uncaught exception:', err.message);
-});
 
 // Auto start if invoked directly
 if (require.main === module) {

@@ -11,6 +11,8 @@ export interface EnqueueOptions {
   totalBytes?: number;
 }
 
+export type CancelResult = 'queued-cancelled' | 'cancellation-requested' | 'already-finished' | 'not-found';
+
 export class TransferTaskState implements TransferProgress {
   public id: string;
   public fileName: string;
@@ -120,6 +122,15 @@ export class TransferTaskState implements TransferProgress {
     this.endTime = Date.now();
   }
 
+  public markCancelled(): void {
+    this.status = 'cancelled';
+    this.speedBytesPerSec = 0;
+    this.speedFormatted = '0 B/s';
+    this.etaSeconds = 0;
+    this.etaFormatted = '--:--';
+    this.endTime = Date.now();
+  }
+
   public static formatBytes(bytes: number): string {
     if (!bytes || bytes === 0) return '0 B';
     const k = 1024;
@@ -147,6 +158,7 @@ export class TransferManager extends EventEmitter {
   private queue: TransferTaskState[] = [];
   private activeTasks: Map<string, TransferTaskState> = new Map();
   private completedTasks: TransferTaskState[] = [];
+  private abortControllers: Map<string, AbortController> = new Map();
   private maxConcurrency: number = 3;
   private taskCounter: number = 0;
 
@@ -256,26 +268,56 @@ export class TransferManager extends EventEmitter {
     this.emit('progress');
   }
 
-  public cancelTask(id: string): void {
+  public cancelTask(id: string): CancelResult {
     const queueIdx = this.queue.findIndex((t) => t.id === id);
     if (queueIdx !== -1) {
       const task = this.queue.splice(queueIdx, 1)[0];
-      task.status = 'cancelled';
+      task.markCancelled();
       this.completedTasks.unshift(task);
       this.emit('task-cancelled', task);
       this.emit('progress', task);
-      return;
+      this.processQueue();
+      return 'queued-cancelled';
     }
 
     const activeTask = this.activeTasks.get(id);
-    if (activeTask) {
-      activeTask.status = 'cancelled';
-      this.activeTasks.delete(id);
-      this.completedTasks.unshift(activeTask);
-      this.emit('task-cancelled', activeTask);
+    const controller = this.abortControllers.get(id);
+    if (activeTask && controller) {
+      if (activeTask.status === 'cancelling') return 'cancellation-requested';
+      activeTask.status = 'cancelling';
       this.emit('progress', activeTask);
-      this.processQueue();
+      controller.abort();
+      return 'cancellation-requested';
     }
+
+    if (this.completedTasks.some((task) => task.id === id)) return 'already-finished';
+    return 'not-found';
+  }
+
+  public cancelAll(): void {
+    for (const task of [...this.queue]) {
+      this.cancelTask(task.id);
+    }
+    for (const task of this.activeTasks.values()) {
+      this.cancelTask(task.id);
+    }
+  }
+
+  public async waitForIdle(timeoutMs: number = 5000): Promise<void> {
+    if (this.activeTasks.size === 0 && this.queue.length === 0) return;
+
+    await new Promise<void>((resolve) => {
+      let timeout: NodeJS.Timeout;
+      const done = () => {
+        clearTimeout(timeout);
+        this.off('queue-empty', onEmpty);
+        resolve();
+      };
+      const onEmpty = () => done();
+      timeout = setTimeout(done, timeoutMs);
+
+      this.once('queue-empty', onEmpty);
+    });
   }
 
   private async processQueue(): Promise<void> {
@@ -293,55 +335,92 @@ export class TransferManager extends EventEmitter {
   }
 
   private async runTask(task: TransferTaskState): Promise<void> {
+    const controller = new AbortController();
+    this.abortControllers.set(task.id, controller);
+    const localTempPath = `${task.localPath}.sbpart-${task.id}`;
+    const remoteTempPath = `${task.remotePath}.sbpart-${task.id}`;
+
     try {
       if (task.direction === 'upload') {
         const stats = await fs.promises.stat(task.localPath);
+        if (controller.signal.aborted) throw this.createAbortError();
         task.markStarted(stats.size);
         this.emit('progress', task);
 
         let lastEmitTime = 0;
-        await this.sftpService.uploadFile(task.localPath, task.remotePath, (transferred, total) => {
-          if (task.status === 'cancelled') return;
+        await this.sftpService.uploadFile(task.localPath, remoteTempPath, (transferred, total) => {
+          if (task.status === 'cancelling' || task.status === 'cancelled') return;
           task.updateProgress(transferred, total);
           const now = Date.now();
           if (now - lastEmitTime >= 120 || transferred === total) {
             lastEmitTime = now;
             this.emit('progress', task);
           }
-        });
+        }, controller.signal);
+
+        if (controller.signal.aborted) throw this.createAbortError();
+        if (await this.sftpService.exists(task.remotePath)) {
+          await this.sftpService.deleteFile(task.remotePath);
+        }
+        await this.sftpService.rename(remoteTempPath, task.remotePath);
       } else {
         const remoteStat = await this.sftpService.stat(task.remotePath);
+        if (controller.signal.aborted) throw this.createAbortError();
         task.markStarted(remoteStat.size);
         this.emit('progress', task);
 
         let lastEmitTime = 0;
-        await this.sftpService.downloadFile(task.remotePath, task.localPath, (transferred, total) => {
-          if (task.status === 'cancelled') return;
+        await this.sftpService.downloadFile(task.remotePath, localTempPath, (transferred, total) => {
+          if (task.status === 'cancelling' || task.status === 'cancelled') return;
           task.updateProgress(transferred, total);
           const now = Date.now();
           if (now - lastEmitTime >= 120 || transferred === total) {
             lastEmitTime = now;
             this.emit('progress', task);
           }
-        });
+        }, controller.signal);
+
+        if (controller.signal.aborted) throw this.createAbortError();
+        await fs.promises.rm(task.localPath, { force: true });
+        await fs.promises.rename(localTempPath, task.localPath);
       }
 
-      if (task.status !== 'cancelled') {
-        task.markCompleted();
-        this.emit('progress', task);
-        this.emit('task-completed', task);
-      }
-    } catch (err: any) {
-      task.markFailed(err.message || String(err));
+      task.markCompleted();
       this.emit('progress', task);
-      this.emit('task-failed', task);
+      this.emit('task-completed', task);
+    } catch (err: any) {
+      if (controller.signal.aborted || err?.name === 'AbortError') {
+        task.markCancelled();
+        this.emit('task-cancelled', task);
+      } else {
+        task.markFailed(err.message || String(err));
+        this.emit('task-failed', task);
+      }
+      this.emit('progress', task);
     } finally {
+      if (task.status !== 'completed') {
+        if (task.direction === 'upload') {
+          await this.sftpService.deleteFile(remoteTempPath).catch(() => {});
+        } else {
+          await fs.promises.rm(localTempPath, { force: true }).catch(() => {});
+        }
+      }
+
+      this.abortControllers.delete(task.id);
       this.activeTasks.delete(task.id);
-      this.completedTasks.unshift(task);
+      if (!this.completedTasks.some((item) => item.id === task.id)) {
+        this.completedTasks.unshift(task);
+      }
       if (this.completedTasks.length > 100) {
         this.completedTasks = this.completedTasks.slice(0, 100);
       }
       this.processQueue();
     }
+  }
+
+  private createAbortError(): Error {
+    const error = new Error('Transfer cancelled');
+    error.name = 'AbortError';
+    return error;
   }
 }

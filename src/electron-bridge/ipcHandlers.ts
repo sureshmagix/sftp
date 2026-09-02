@@ -47,6 +47,8 @@ export class SftpAppController {
     });
 
     ipcMain.handle('sftp:disconnect', async () => {
+      this.transferManager.cancelAll();
+      await this.transferManager.waitForIdle();
       await this.sshConnection.disconnect();
       return { success: true };
     });
@@ -196,8 +198,8 @@ export class SftpAppController {
     });
 
     ipcMain.handle('sftp:cancel-transfer', (_event: any, taskId: string) => {
-      this.transferManager.cancelTask(taskId);
-      return { success: true };
+      const result = this.transferManager.cancelTask(taskId);
+      return { success: result !== 'not-found', result };
     });
 
     ipcMain.handle('sftp:get-transfers', () => {

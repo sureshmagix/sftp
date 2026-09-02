@@ -20,13 +20,14 @@ function getAppIconPath(): string {
   return path.join(__dirname, 'logo.png');
 }
 
-async function startServer(): Promise<number> {
+async function startServer(): Promise<string> {
   serverInstance = new SftpWebServer(DEFAULT_PORT);
   await serverInstance.start(false);
-  return serverInstance.getPort();
+  return serverInstance.getLaunchUrl();
 }
 
-async function createWindow(port: number) {
+async function createWindow(launchUrl: string) {
+  const appOrigin = new URL(launchUrl).origin;
   mainWindow = new BrowserWindow({
     width: 1320,
     height: 860,
@@ -39,6 +40,10 @@ async function createWindow(port: number) {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
+      sandbox: true,
+      webSecurity: true,
+      allowRunningInsecureContent: false,
+      webviewTag: false,
     },
     autoHideMenuBar: true,
   });
@@ -51,10 +56,21 @@ async function createWindow(port: number) {
     return { action: 'deny' };
   });
 
+  mainWindow.webContents.on('will-navigate', (event: any, navigationUrl: string) => {
+    if (new URL(navigationUrl).origin !== appOrigin) {
+      event.preventDefault();
+      if (navigationUrl.startsWith('https://')) shell.openExternal(navigationUrl);
+    }
+  });
+
+  mainWindow.webContents.session.setPermissionRequestHandler((_webContents: any, _permission: string, callback: (allowed: boolean) => void) => {
+    callback(false);
+  });
+
   try {
-    await mainWindow.loadURL(`http://127.0.0.1:${port}`);
+    await mainWindow.loadURL(launchUrl);
   } catch (err: any) {
-    console.error(`Failed to load URL http://127.0.0.1:${port}:`, err.message);
+    console.error(`Failed to load SB SFTP Studio:`, err.message);
   }
 
   mainWindow.show();
@@ -67,12 +83,12 @@ async function createWindow(port: number) {
 
 app.whenReady().then(async () => {
   try {
-    const port = await startServer();
-    await createWindow(port);
+    const launchUrl = await startServer();
+    await createWindow(launchUrl);
 
     app.on('activate', async () => {
       if (BrowserWindow.getAllWindows().length === 0) {
-        await createWindow(port);
+        await createWindow(launchUrl);
       }
     });
   } catch (err) {

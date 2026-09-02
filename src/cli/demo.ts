@@ -31,6 +31,7 @@ async function runDemo() {
   const username = process.env.SSH_USER || process.env.SSH_USERNAME;
   const password = process.env.SSH_PASSWORD;
   const privateKeyPath = process.env.SSH_KEY_PATH;
+  const hostFingerprint = process.env.SSH_HOST_FINGERPRINT;
   const port = process.env.SSH_PORT ? parseInt(process.env.SSH_PORT, 10) : 22;
 
   if (!host || !username) {
@@ -40,6 +41,7 @@ async function runDemo() {
     console.log('   SSH_HOST=192.168.1.xxx (or raspberrypi.local)');
     console.log('   SSH_USER=pi');
     console.log('   SSH_PASSWORD=your_password (or SSH_KEY_PATH=/path/to/id_rsa)');
+    console.log('   SSH_HOST_FINGERPRINT=SHA256:verified_server_fingerprint');
     console.log('-----------------------------------------------------\n');
     console.log('✅ Core Engine & Local FS test passed cleanly!');
     return;
@@ -73,6 +75,7 @@ async function runDemo() {
       username,
       password,
       privateKey,
+      hostFingerprint,
     };
 
     await connection.connect(config);

@@ -2,7 +2,9 @@
 
 **SB SFTP Studio** is a modern, high-performance, cross-platform Desktop GUI and Web Hub for managing **Multi-Client SSH and SFTP remote server connections**.
 
-Built with TypeScript, Express, WebSockets, xterm.js, and Electron.
+Built with TypeScript, Express, WebSockets, SSH2, and Electron.
+
+Current release: **v1.1.0**
 
 ---
 
@@ -12,7 +14,8 @@ Built with TypeScript, Express, WebSockets, xterm.js, and Electron.
 - 👥 **Multi-Client Profiles Manager**: Store and switch between multiple remote servers with saved credentials and quick connection.
 - ⚡ **Bi-Directional File & Folder Transfers**: Background transfer queue with progress bars, speed metrics, ETA calculations, and directory recursive syncing.
 - 🗑️ **Full File & Folder Deletion**: Delete single files or entire directory trees safely on both local and remote systems.
-- 💻 **Integrated Interactive SSH Terminal**: Powered by WebSockets and xterm.js, with support for detaching into a floating resizable desktop window.
+- 💻 **Integrated SSH Command Terminal**: Run remote commands with a detachable floating desktop window.
+- 🛑 **Real Transfer Cancellation**: Active transfers are aborted, partial files are removed, and queue concurrency remains enforced.
 - 👁️ **In-App Media & Code Preview**: Instant modal preview for text, JSON, logs, markdown, source code, and images with syntax highlighting.
 - 🎨 **13 Professional Themes**:
   - *Dark*: Midnight Neon, GitHub Dark Dimmed, VS Code Modern, One Dark Pro, Catppuccin Mocha, Nordic Frost, Cyber Dracula, Emerald Matrix, Solarized Dark.
@@ -26,14 +29,14 @@ Built with TypeScript, Express, WebSockets, xterm.js, and Electron.
 ## 🛠️ Getting Started
 
 ### Prerequisites
-- [Node.js](https://nodejs.org/) (v18 or higher recommended)
+- [Node.js](https://nodejs.org/) (v20 or higher)
 - `npm`
 
 ### Installation
 ```bash
 # Clone the repository
-git clone https://github.com/sureshmagix/sb-sftp-studio.git
-cd sb-sftp-studio
+git clone https://github.com/sureshmagix/sftp.git
+cd sftp
 
 # Install dependencies
 npm install
@@ -43,7 +46,7 @@ npm install
 ```bash
 npm start
 ```
-Open [http://localhost:3000](http://localhost:3000) in your browser.
+`npm start` opens an authenticated browser window automatically. The server is restricted to `127.0.0.1`; a manually opened unauthenticated URL is rejected.
 
 ### Running the Electron Desktop App
 ```bash
@@ -87,3 +90,35 @@ npm run dist:all
 
 ## 📄 License
 This project is licensed under the [MIT License](LICENSE).
+
+## ✅ Quality Checks
+
+Run the complete build, syntax, transfer-cancellation, server-security, and API smoke-test suite with:
+
+```bash
+npm run check
+```
+
+Check production dependencies for known vulnerabilities with:
+
+```bash
+npm audit
+```
+
+## 🔐 Security Defaults
+
+- Local UI binding is restricted to `127.0.0.1`.
+- API and WebSocket access require a random per-process session token.
+- SSH passwords are kept in memory for the current session only and are excluded from local storage and profile exports.
+- SSH host keys require a verified SHA-256 fingerprint, preventing silent man-in-the-middle connections.
+- LAN mode is disabled by default. Set `SFTP_ALLOW_LAN=true` only on a trusted network with appropriate host firewall rules.
+
+## 🏷️ v1.1.0 Release Highlights
+
+- Added reliable cancellation for queued and active uploads/downloads, including partial-file cleanup.
+- Added transfer lifecycle controls for cancelling all transfers and waiting for the queue to become idle.
+- Added mandatory SSH SHA-256 host-key fingerprint verification.
+- Added authenticated API/WebSocket sessions, trusted-origin checks, restrictive security headers, and local-only binding by default.
+- Hardened Electron navigation, permissions, and renderer sandboxing.
+- Removed persistent password storage and sanitized imported/exported profiles.
+- Added atomic port switching, automated transfer/security/API tests, and zero-vulnerability dependency updates.

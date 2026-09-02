@@ -124,8 +124,8 @@
         <div class="form-field field-pass">
           <div class="label-with-action">
             <label for="sshPassword"><i class="fa-solid fa-lock"></i> Password</label>
-            <label class="remember-pass-label" title="Remember password on this device">
-              <input type="checkbox" id="rememberPasswordCheck" checked> Remember
+            <label class="remember-pass-label" title="Keep password only until this application is closed">
+              <input type="checkbox" id="rememberPasswordCheck"> Keep for session
             </label>
           </div>
           <div class="input-with-icon">
@@ -137,6 +137,11 @@
         <div class="form-field field-key">
           <label for="sshKeyPath"><i class="fa-solid fa-key"></i> Private Key (Optional)</label>
           <input type="text" id="sshKeyPath" placeholder="~/.ssh/id_rsa">
+        </div>
+
+        <div class="form-field field-fingerprint">
+          <label for="sshFingerprint"><i class="fa-solid fa-shield-halved"></i> Host Key SHA256</label>
+          <input type="text" id="sshFingerprint" placeholder="Connect once to obtain fingerprint">
         </div>
 
         <div class="form-actions">
@@ -639,11 +644,15 @@
             </div>
             <div class="form-field">
               <label>Password (Optional):</label>
-              <input type="password" id="editClientPassword" placeholder="Enter password to remember">
+              <input type="password" id="editClientPassword" placeholder="Keep for this session only">
             </div>
             <div class="form-field">
               <label>Private Key Path (Optional):</label>
               <input type="text" id="editClientKeyPath" placeholder="~/.ssh/id_rsa">
+            </div>
+            <div class="form-field">
+              <label>Host Key SHA256 Fingerprint:</label>
+              <input type="text" id="editClientFingerprint" placeholder="SHA256:…">
             </div>
           </div>
           <div class="client-form-actions">

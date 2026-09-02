@@ -2,7 +2,7 @@
   "name": "sb-sftp-studio",
   "productName": "SB SFTP Studio",
   "description": "Multi-Client SSH & SFTP Desktop Studio for Remote Servers",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "main": "dist/electron/main.js",
   "types": "dist/index.d.ts",
   "scripts": {
@@ -19,7 +19,9 @@
     "dist:win": "npm run build && electron-builder --win --x64",
     "dist:linux": "npm run build && electron-builder --linux --x64",
     "dist:all": "npm run build && electron-builder -mwl --x64 --arm64 -c.mac.identity=null",
-    "demo": "npx tsx src/cli/demo.ts"
+    "demo": "npx tsx src/cli/demo.ts",
+    "test": "npm run build && node --test tests/*.test.js",
+    "check": "node --check src/ui/public/app.js && npm test"
   },
   "keywords": [
     "sftp",
@@ -32,11 +34,14 @@
   ],
   "author": "SB SFTP",
   "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
   "build": {
     "appId": "com.sbsftp.studio",
     "productName": "SB SFTP Studio",
     "copyright": "Copyright © 2026 SB SFTP",
-    "electronVersion": "29.4.0",
+    "electronVersion": "44.1.1",
     "npmRebuild": false,
     "asar": true,
     "directories": {
@@ -144,19 +149,19 @@
     }
   },
   "dependencies": {
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "ssh2": "^1.17.0",
+    "ws": "^8.21.3"
+  },
+  "devDependencies": {
     "@types/express": "^5.0.6",
     "@types/node": "^26.2.0",
     "@types/ssh2": "^1.15.5",
     "@types/ws": "^8.18.1",
-    "dotenv": "^17.4.2",
-    "express": "^4.22.2",
-    "ssh2": "^1.17.0",
+    "electron": "^44.1.1",
+    "electron-builder": "^26.15.3",
     "tsx": "^4.23.12",
-    "typescript": "^7.0.2",
-    "ws": "^8.21.3"
-  },
-  "devDependencies": {
-    "electron": "^29.4.0",
-    "electron-builder": "^26.15.3"
+    "typescript": "^7.0.2"
   }
 }
