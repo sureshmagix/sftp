@@ -32,7 +32,7 @@
     "electron",
     "gui"
   ],
-  "author": "SB SFTP",
+  "author": "SB SFTP <sureshmagix@gmail.com>",
   "license": "MIT",
   "engines": {
     "node": ">=20"
