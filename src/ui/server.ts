@@ -608,11 +608,13 @@ export class SftpWebServer {
     // Transfer Queue: Enqueue Directory Upload
     this.app.post('/api/enqueue-dir-upload', async (req: Request, res: Response) => {
       const { localDir, remoteDir } = req.body;
+      const batchId = `batch_up_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
       try {
-        const tasks = await this.controller.transferManager.enqueueDirectoryUpload(localDir, remoteDir);
+        const tasks = await this.controller.transferManager.enqueueDirectoryUpload(localDir, remoteDir, batchId);
         const totalBytes = tasks.reduce((sum, t) => sum + (t.totalBytes || 0), 0);
         res.json({
           success: true,
+          batchId,
           count: tasks.length,
           totalBytes,
           tasks,
@@ -625,11 +627,13 @@ export class SftpWebServer {
     // Transfer Queue: Enqueue Directory Download
     this.app.post('/api/enqueue-dir-download', async (req: Request, res: Response) => {
       const { remoteDir, localDir } = req.body;
+      const batchId = `batch_dl_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
       try {
-        const tasks = await this.controller.transferManager.enqueueDirectoryDownload(remoteDir, localDir);
+        const tasks = await this.controller.transferManager.enqueueDirectoryDownload(remoteDir, localDir, batchId);
         const totalBytes = tasks.reduce((sum, t) => sum + (t.totalBytes || 0), 0);
         res.json({
           success: true,
+          batchId,
           count: tasks.length,
           totalBytes,
           tasks,
@@ -646,12 +650,13 @@ export class SftpWebServer {
         return res.status(400).json({ success: false, error: 'No items provided for download' });
       }
       try {
+        const batchId = `batch_dl_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
         const targetLocalDir = (localDir || this.controller.localFsService.getHomeDir()).replace(/\\/g, '/');
         let totalTasks = 0;
 
         for (const item of items) {
           if (item.isDirectory) {
-            const tasks = await this.controller.transferManager.enqueueDirectoryDownload(item.remotePath, targetLocalDir);
+            const tasks = await this.controller.transferManager.enqueueDirectoryDownload(item.remotePath, targetLocalDir, batchId);
             totalTasks += tasks.length;
           } else {
             const fileName = path.posix.basename(item.remotePath);
@@ -662,12 +667,13 @@ export class SftpWebServer {
               localPath: targetLocalPath,
               remotePath: item.remotePath,
               direction: 'download',
+              batchId,
             });
             totalTasks++;
           }
         }
 
-        res.json({ success: true, count: totalTasks });
+        res.json({ success: true, batchId, count: totalTasks });
       } catch (err: any) {
         res.status(500).json({ success: false, error: err.message });
       }
@@ -680,13 +686,14 @@ export class SftpWebServer {
         return res.status(400).json({ success: false, error: 'No items provided for upload' });
       }
       try {
+        const batchId = `batch_up_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
         const targetRemoteDir = remoteDir || '.';
         let totalTasks = 0;
 
         for (const item of items) {
           const lPath = (item.localPath || '').replace(/\\/g, '/');
           if (item.isDirectory) {
-            const tasks = await this.controller.transferManager.enqueueDirectoryUpload(lPath, targetRemoteDir);
+            const tasks = await this.controller.transferManager.enqueueDirectoryUpload(lPath, targetRemoteDir, batchId);
             totalTasks += tasks.length;
           } else {
             const fileName = path.basename(lPath);
@@ -699,12 +706,13 @@ export class SftpWebServer {
               localPath: lPath,
               remotePath: targetRemotePath,
               direction: 'upload',
+              batchId,
             });
             totalTasks++;
           }
         }
 
-        res.json({ success: true, count: totalTasks });
+        res.json({ success: true, batchId, count: totalTasks });
       } catch (err: any) {
         res.status(500).json({ success: false, error: err.message });
       }
@@ -822,10 +830,26 @@ export class SftpWebServer {
       broadcastProgressThrottled();
     });
 
+    this.controller.transferManager.on('task-retry', (task, retryCount, reason) => {
+      broadcast({ type: 'task-retry', task, retryCount, reason });
+      broadcastProgressThrottled();
+    });
+
     this.controller.transferManager.on('queue-empty', () => {
       broadcast({ type: 'queue-empty' });
       broadcastProgressThrottled();
     });
+
+    // Forward SSH connection status to all connected UI clients
+    this.controller.sshConnection.on('status-change', (status, err) => {
+      broadcast({ type: 'connection-status', status, error: err?.message });
+    });
+
+    // Periodic WebSocket Heartbeat (every 20s) to keep idle sockets active
+    const wsHeartbeatInterval = setInterval(() => {
+      broadcast({ type: 'heartbeat', timestamp: Date.now() });
+    }, 20000);
+    if (wsHeartbeatInterval.unref) wsHeartbeatInterval.unref();
   }
 
   public async changePort(newPort: number): Promise<void> {

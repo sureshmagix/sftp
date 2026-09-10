@@ -8,6 +8,11 @@ export class SshConnection extends EventEmitter {
   private sftpWrapper: SFTPWrapper | null = null;
   private status: ConnectionStatus = 'disconnected';
   private config: SshConnectConfig | null = null;
+  private isManualDisconnect: boolean = false;
+  private heartbeatTimer: NodeJS.Timeout | null = null;
+  private reconnectTimer: NodeJS.Timeout | null = null;
+  private reconnectAttempts: number = 0;
+  private readonly maxReconnectAttempts: number = 3;
 
   constructor() {
     super();
@@ -32,13 +37,78 @@ export class SshConnection extends EventEmitter {
     }
   }
 
+  private startHeartbeat(): void {
+    this.stopHeartbeat();
+    this.heartbeatTimer = setInterval(async () => {
+      if (this.status !== 'connected' || !this.client) return;
+      try {
+        if (this.sftpWrapper) {
+          await new Promise<void>((resolve, reject) => {
+            const timeout = setTimeout(() => reject(new Error('Heartbeat timeout')), 7000);
+            this.sftpWrapper!.realpath('.', (err) => {
+              clearTimeout(timeout);
+              if (err) reject(err);
+              else resolve();
+            });
+          });
+        }
+      } catch (err: any) {
+        console.warn(`[SshConnection] Idle heartbeat ping failed: ${err?.message || err}`);
+        if (this.client && !this.isManualDisconnect && this.status === 'connected') {
+          try {
+            this.client.end();
+          } catch (_) {}
+        }
+      }
+    }, 20000);
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+  }
+
+  private triggerAutoReconnect(): void {
+    if (this.isManualDisconnect || !this.config || this.status === 'reconnecting') return;
+    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+      this.setStatus('disconnected');
+      return;
+    }
+
+    this.reconnectAttempts++;
+    this.setStatus('reconnecting');
+    const delay = Math.min(10000, 2000 * Math.pow(2, this.reconnectAttempts - 1));
+    console.log(`[SshConnection] Connection lost while idle. Attempting auto-reconnect (${this.reconnectAttempts}/${this.maxReconnectAttempts}) in ${delay}ms...`);
+
+    this.reconnectTimer = setTimeout(async () => {
+      this.reconnectTimer = null;
+      if (this.isManualDisconnect || !this.config) return;
+      try {
+        await this.connect(this.config);
+        console.log('[SshConnection] Auto-reconnect succeeded.');
+      } catch (err: any) {
+        console.warn(`[SshConnection] Auto-reconnect attempt ${this.reconnectAttempts} failed: ${err.message}`);
+        if (this.reconnectAttempts < this.maxReconnectAttempts) {
+          this.triggerAutoReconnect();
+        } else {
+          this.setStatus('disconnected', err);
+        }
+      }
+    }, delay);
+  }
+
   public async connect(config: SshConnectConfig): Promise<void> {
     if (this.client) {
       await this.disconnect();
     }
 
+    this.isManualDisconnect = false;
     this.config = config;
-    this.setStatus('connecting');
+    if (this.status !== 'reconnecting') {
+      this.setStatus('connecting');
+    }
 
     return new Promise((resolve, reject) => {
       const client = new Ssh2Client();
@@ -50,7 +120,9 @@ export class SshConnection extends EventEmitter {
       client.on('ready', () => {
         if (!isSettled) {
           isSettled = true;
+          this.reconnectAttempts = 0;
           this.setStatus('connected');
+          this.startHeartbeat();
           this.emit('ready');
           resolve();
         }
@@ -72,6 +144,7 @@ export class SshConnection extends EventEmitter {
           ) as any;
         }
 
+        this.stopHeartbeat();
         this.setStatus('error', connectionError);
         this.emit('error', connectionError);
         if (!isSettled) {
@@ -81,20 +154,31 @@ export class SshConnection extends EventEmitter {
       });
 
       client.on('close', () => {
+        const wasConnected = this.status === 'connected';
+        this.stopHeartbeat();
         if (this.client === client) {
           this.client = null;
           this.sftpWrapper = null;
-          this.setStatus('disconnected');
         }
         this.emit('close');
         if (!isSettled) {
           isSettled = true;
+          this.setStatus('disconnected');
           reject(new Error('SSH connection closed before handshake completed.'));
+        } else if (wasConnected && !this.isManualDisconnect) {
+          this.triggerAutoReconnect();
+        } else {
+          this.setStatus('disconnected');
         }
       });
 
       client.on('end', () => {
-        this.setStatus('disconnected');
+        this.stopHeartbeat();
+        if (!this.isManualDisconnect && this.status === 'connected') {
+          this.triggerAutoReconnect();
+        } else {
+          this.setStatus('disconnected');
+        }
         this.emit('end');
       });
 
@@ -104,6 +188,7 @@ export class SshConnection extends EventEmitter {
         username: config.username,
         readyTimeout: config.readyTimeout || 20000,
         keepaliveInterval: config.keepaliveInterval || 10000,
+        keepaliveCountMax: 5,
         hostVerifier: (key: Buffer) => {
           observedFingerprint = `SHA256:${createHash('sha256').update(key).digest('base64').replace(/=+$/, '')}`;
           if (!config.hostFingerprint) return false;
@@ -132,6 +217,7 @@ export class SshConnection extends EventEmitter {
         client.connect(fullConfig);
       } catch (err) {
         isSettled = true;
+        this.stopHeartbeat();
         if (this.client === client) this.client = null;
         this.setStatus('error', err as Error);
         reject(err);
@@ -172,6 +258,13 @@ export class SshConnection extends EventEmitter {
   }
 
   public async disconnect(): Promise<void> {
+    this.isManualDisconnect = true;
+    this.stopHeartbeat();
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+
     if (this.sftpWrapper) {
       try {
         this.sftpWrapper.end();

@@ -4,7 +4,7 @@
 
 Built with TypeScript, Express, WebSockets, SSH2, and Electron.
 
-Current release: **v1.1.0**
+Current release: **v1.2.0**
 
 ---
 
@@ -112,6 +112,24 @@ npm audit
 - SSH passwords are kept in memory for the current session only and are excluded from local storage and profile exports.
 - SSH host keys require a verified SHA-256 fingerprint, preventing silent man-in-the-middle connections.
 - LAN mode is disabled by default. Set `SFTP_ALLOW_LAN=true` only on a trusted network with appropriate host firewall rules.
+
+## 🏷️ v1.2.0 Release Highlights
+
+- **Transfer Consistency for Large File & Folder Transfers**:
+  - Automatic recursive remote directory creation ensures deeply nested folders and parent directories exist before writing.
+  - Byte-level size integrity checks on upload and download prevent truncated transfers from being renamed to final filenames.
+  - Complete preservation of empty directory hierarchies during recursive directory uploads and downloads.
+  - Added transient network error retries (up to 2 automatic retries with backoff) to protect large batch transfers against socket resets.
+  - Atomic temporary transfer files (`.sbpart-*`) with automatic cleanup upon cancellation or failure.
+- **Idle Connectivity Maintenance & Heartbeat**:
+  - Active idle SFTP heartbeat ping every 20s prevents stateful firewall, NAT router, and sshd idle channel timeouts.
+  - Automatic reconnection with exponential backoff on unexpected drops while idle.
+  - Periodic WebSocket server heartbeat keeps client-server connection alive and detects disconnections instantly.
+- **Enhanced Toast Notification System**:
+  - Interactive **Live Process Toast** displays real-time transfer progress, speed, ETA, and item counts with an animated progress bar.
+  - Prominent **Batch Completion Toast** summarizes finished transfers, total transferred size, and duration.
+  - Anti-flood deduplication prevents toast spamming during multi-file transfers.
+  - Modern glassmorphic card design with distinct status badges and close controls.
 
 ## 🏷️ v1.1.0 Release Highlights
 

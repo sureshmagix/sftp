@@ -9,6 +9,8 @@ export interface EnqueueOptions {
   remotePath: string;
   direction: TransferDirection;
   totalBytes?: number;
+  batchId?: string;
+  maxRetries?: number;
 }
 
 export type CancelResult = 'queued-cancelled' | 'cancellation-requested' | 'already-finished' | 'not-found';
@@ -32,6 +34,9 @@ export class TransferTaskState implements TransferProgress {
   public totalFormatted: string = '0 B';
   public startTime: number = 0;
   public endTime?: number;
+  public batchId?: string;
+  public retries: number = 0;
+  public maxRetries: number = 2;
 
   private lastTime: number = 0;
   private lastTransferred: number = 0;
@@ -44,6 +49,8 @@ export class TransferTaskState implements TransferProgress {
     this.fileName = path.basename(opts.direction === 'upload' ? opts.localPath : opts.remotePath);
     this.totalBytes = opts.totalBytes || 0;
     this.totalFormatted = TransferTaskState.formatBytes(this.totalBytes);
+    this.batchId = opts.batchId;
+    this.maxRetries = opts.maxRetries ?? 2;
   }
 
   public markStarted(totalBytes?: number): void {
@@ -186,7 +193,8 @@ export class TransferManager extends EventEmitter {
   /**
    * Recursively enqueue a directory for upload
    */
-  public async enqueueDirectoryUpload(localDir: string, remoteDir: string): Promise<TransferTaskState[]> {
+  public async enqueueDirectoryUpload(localDir: string, remoteDir: string, batchId?: string): Promise<TransferTaskState[]> {
+    const bId = batchId || `batch_${Date.now()}_${++this.taskCounter}`;
     const tasks: TransferTaskState[] = [];
     const folderName = path.basename(localDir);
     const targetRemoteDir = remoteDir === '.' ? folderName : path.posix.join(remoteDir, folderName);
@@ -210,6 +218,7 @@ export class TransferManager extends EventEmitter {
             remotePath: rPath,
             direction: 'upload',
             totalBytes: stats.size,
+            batchId: bId,
           });
           tasks.push(task);
         }
@@ -223,7 +232,8 @@ export class TransferManager extends EventEmitter {
   /**
    * Recursively enqueue a directory for download
    */
-  public async enqueueDirectoryDownload(remoteDir: string, localDir: string): Promise<TransferTaskState[]> {
+  public async enqueueDirectoryDownload(remoteDir: string, localDir: string, batchId?: string): Promise<TransferTaskState[]> {
+    const bId = batchId || `batch_${Date.now()}_${++this.taskCounter}`;
     const tasks: TransferTaskState[] = [];
     const folderName = path.posix.basename(remoteDir);
     const targetLocalDir = path.join(localDir, folderName);
@@ -245,6 +255,7 @@ export class TransferManager extends EventEmitter {
             remotePath: item.path,
             direction: 'download',
             totalBytes: item.size,
+            batchId: bId,
           });
           tasks.push(task);
         }
@@ -392,11 +403,17 @@ export class TransferManager extends EventEmitter {
       if (controller.signal.aborted || err?.name === 'AbortError') {
         task.markCancelled();
         this.emit('task-cancelled', task);
+        this.emit('progress', task);
+      } else if (task.retries < task.maxRetries) {
+        task.retries++;
+        task.status = 'queued';
+        this.emit('task-retry', task, task.retries, err?.message || String(err));
+        this.emit('progress', task);
       } else {
-        task.markFailed(err.message || String(err));
+        task.markFailed(err?.message || String(err));
         this.emit('task-failed', task);
+        this.emit('progress', task);
       }
-      this.emit('progress', task);
     } finally {
       if (task.status !== 'completed') {
         if (task.direction === 'upload') {
@@ -408,6 +425,15 @@ export class TransferManager extends EventEmitter {
 
       this.abortControllers.delete(task.id);
       this.activeTasks.delete(task.id);
+
+      if (task.status === 'queued') {
+        setTimeout(() => {
+          this.queue.unshift(task);
+          this.processQueue();
+        }, 350 * task.retries);
+        return;
+      }
+
       if (!this.completedTasks.some((item) => item.id === task.id)) {
         this.completedTasks.unshift(task);
       }

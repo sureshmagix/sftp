@@ -41,11 +41,89 @@ let isRemoteRecentFilterActive = false;
 let wasTransferring = false;
 let lastTransferCompleteToastTime = 0;
 
-function notifyAllTransfersCompleted() {
+// Batch & Process Transfer Tracker for Toasts
+let transferBatchTracker = {
+  active: false,
+  startTime: 0,
+  totalTasks: 0,
+  completedTasks: 0,
+  failedTasks: 0,
+  totalBytes: 0,
+  transferredBytes: 0,
+};
+
+function updateTransferProcessToast(stats, activeTasks) {
+  const currentTask = activeTasks.find(t => t.status === 'transferring') || activeTasks[0];
+  if (!currentTask) return;
+
+  const isUp = currentTask.direction === 'upload';
+  const dirIcon = isUp ? 'fa-arrow-up' : 'fa-arrow-down';
+  const dirLabel = isUp ? 'Uploading' : 'Downloading';
+  const totalItems = Math.max(stats.totalTasks, stats.completedTasks + activeTasks.length);
+  const currentItemIndex = Math.min(totalItems, stats.completedTasks + 1);
+
+  let overallPercentage = currentTask.percentage || 0;
+  if (stats.totalBytes > 0) {
+    const transferred = stats.transferredBytes + (currentTask.transferredBytes || 0);
+    overallPercentage = Math.min(100, Math.round((transferred / stats.totalBytes) * 100));
+  }
+
+  const speed = currentTask.speedFormatted || '0 B/s';
+  const eta = currentTask.etaFormatted || '--:--';
+
+  const bodyContent = `
+    <strong>${escapeHtml(currentTask.fileName)}</strong><br/>
+    <span style="color: #94a3b8;"><i class="fa-solid ${dirIcon}"></i> ${dirLabel} item ${currentItemIndex} of ${totalItems}</span>
+  `;
+
+  const metaContent = `
+    <span>${overallPercentage}% • ${speed}</span>
+    <span>ETA: ${eta}</span>
+  `;
+
+  showToast('process', bodyContent, {
+    id: 'transferProcessToast',
+    title: `${isUp ? '⬆️' : '⬇️'} Transfer in Progress...`,
+    isHtml: true,
+    progress: overallPercentage,
+    meta: metaContent,
+  });
+}
+
+function removeTransferProcessToast() {
+  dismissToast('transferProcessToast');
+}
+
+function notifyAllTransfersCompleted(stats) {
+  removeTransferProcessToast();
+
   const now = Date.now();
-  if (now - lastTransferCompleteToastTime > 1500) {
-    lastTransferCompleteToastTime = now;
-    showToast('success', '🎉 All files transferred successfully!');
+  if (now - lastTransferCompleteToastTime < 1000) return;
+  lastTransferCompleteToastTime = now;
+
+  const durationSec = stats && stats.startTime ? Math.max(1, Math.round((now - stats.startTime) / 1000)) : 1;
+  const count = stats && stats.completedTasks ? stats.completedTasks : 1;
+  const failed = stats && stats.failedTasks ? stats.failedTasks : 0;
+  const bytes = stats && stats.totalBytes ? stats.totalBytes : 0;
+  const sizeFormatted = bytes > 0 ? ` (${formatBytes(bytes)})` : '';
+
+  if (failed === 0) {
+    if (count > 1) {
+      showToast('success', `All ${count} files and folders transferred successfully${sizeFormatted} in ${durationSec}s.`, {
+        title: '🎉 Batch Transfer Completed',
+        duration: 5000,
+      });
+    } else {
+      showToast('success', `File transferred successfully${sizeFormatted} in ${durationSec}s.`, {
+        title: '🎉 Transfer Completed',
+        duration: 4500,
+      });
+    }
+  } else {
+    showToast('warning', `${count} completed, ${failed} failed${sizeFormatted}. View Transfer Queue for error details.`, {
+      title: '⚠️ Transfer Completed with Errors',
+      duration: 6500,
+    });
   }
 }
 
@@ -1083,6 +1161,10 @@ function initWebSocket() {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
 
+  ws.onopen = () => {
+    checkConnectionStatus();
+  };
+
   ws.onmessage = (event) => {
     try {
       const data = JSON.parse(event.data);
@@ -1091,23 +1173,66 @@ function initWebSocket() {
       } else if (data.type === 'task-completed') {
         const task = data.task;
         if (task) {
-          showToast('success', `Completed: ${task.fileName} (${task.transferredFormatted || formatBytes(task.totalBytes)})`);
+          transferBatchTracker.completedTasks++;
+          transferBatchTracker.transferredBytes += (task.totalBytes || 0);
           if (task.localPath) recentlyTransferredPaths.add(task.localPath);
           if (task.remotePath) recentlyTransferredPaths.add(task.remotePath);
           if (task.fileName) recentlyTransferredPaths.add(task.fileName);
+
+          // Only show individual toast if there are 2 or fewer items in total
+          const totalTasks = transferBatchTracker.totalTasks || 1;
+          if (totalTasks <= 2) {
+            showToast('success', `${task.fileName} (${task.transferredFormatted || formatBytes(task.totalBytes)})`, {
+              title: '✓ File Transfer Complete',
+              duration: 3500,
+            });
+          }
         }
         silentSyncAll();
       } else if (data.type === 'task-failed') {
         const task = data.task;
         if (task) {
-          showToast('error', `Failed: ${task.fileName} - ${task.error || 'Unknown error'}`);
+          transferBatchTracker.failedTasks++;
+          showToast('error', `${task.fileName}: ${task.error || 'Unknown error'}`, {
+            title: '✕ Transfer Failed',
+            duration: 6000,
+          });
+        }
+      } else if (data.type === 'task-retry') {
+        const task = data.task;
+        if (task) {
+          showToast('info', `Retrying ${task.fileName} (attempt ${data.retryCount}/2)...`, {
+            title: '🔄 Connection Interrupted',
+            duration: 3500,
+          });
         }
       } else if (data.type === 'queue-empty') {
         if (wasTransferring) {
           wasTransferring = false;
-          notifyAllTransfersCompleted();
+          notifyAllTransfersCompleted(transferBatchTracker);
         }
         silentSyncAll();
+      } else if (data.type === 'connection-status') {
+        updateConnectionUI(data.status);
+        if (data.status === 'reconnecting') {
+          showToast('warning', 'Connection lost while idle. Attempting auto-reconnect...', {
+            title: '📡 Reconnecting to Server',
+            duration: 4000,
+          });
+        } else if (data.status === 'connected') {
+          showToast('success', 'SSH and SFTP connection restored.', {
+            title: '🟢 Connected',
+            duration: 3500,
+          });
+          silentSyncAll();
+        } else if (data.status === 'error' && data.error) {
+          showToast('error', data.error, {
+            title: 'Connection Error',
+            duration: 5000,
+          });
+        }
+      } else if (data.type === 'heartbeat') {
+        // Heartbeat keep-alive active
       }
     } catch (e) {
       console.error('Error parsing WS message:', e);
@@ -1186,10 +1311,10 @@ function updateConnectionUI(status) {
     updateHistoryButtons();
     setTimeout(detectRemoteEnvironment, 300);
     setTimeout(updateTerminalDimensions, 100);
-  } else if (status === 'connecting') {
-    statusText.innerText = 'Connecting...';
+  } else if (status === 'connecting' || status === 'reconnecting') {
+    statusText.innerText = status === 'reconnecting' ? 'Reconnecting...' : 'Connecting...';
     btnConnect.disabled = true;
-    btnDisconnect.disabled = true;
+    btnDisconnect.disabled = status === 'connecting';
     if (btnRemoteRecent) btnRemoteRecent.disabled = true;
     if (btnRemoteUploadFolder) btnRemoteUploadFolder.disabled = true;
     if (btnRemoteUploadFiles) btnRemoteUploadFiles.disabled = true;
@@ -3286,10 +3411,30 @@ function renderTransfersList(tasks) {
   const failedTasks = activeTransfersCache.filter(t => t.status === 'failed');
 
   if (activeTasks.length > 0) {
+    if (!transferBatchTracker.active) {
+      transferBatchTracker.active = true;
+      transferBatchTracker.startTime = Date.now();
+      transferBatchTracker.completedTasks = completedTasks.length;
+      transferBatchTracker.failedTasks = failedTasks.length;
+      transferBatchTracker.totalTasks = activeTransfersCache.length;
+      transferBatchTracker.totalBytes = activeTransfersCache.reduce((sum, t) => sum + (t.totalBytes || 0), 0);
+      transferBatchTracker.transferredBytes = completedTasks.reduce((sum, t) => sum + (t.totalBytes || 0), 0);
+    } else {
+      transferBatchTracker.totalTasks = Math.max(transferBatchTracker.totalTasks, activeTransfersCache.length);
+      transferBatchTracker.completedTasks = completedTasks.length;
+      transferBatchTracker.failedTasks = failedTasks.length;
+      transferBatchTracker.totalBytes = Math.max(
+        transferBatchTracker.totalBytes,
+        activeTransfersCache.reduce((sum, t) => sum + (t.totalBytes || 0), 0)
+      );
+    }
     wasTransferring = true;
+    updateTransferProcessToast(transferBatchTracker, activeTasks);
   } else if (wasTransferring && activeTasks.length === 0) {
     wasTransferring = false;
-    notifyAllTransfersCompleted();
+    transferBatchTracker.completedTasks = completedTasks.length;
+    transferBatchTracker.failedTasks = failedTasks.length;
+    notifyAllTransfersCompleted(transferBatchTracker);
   }
 
   const badge = document.getElementById('transferBadge');
@@ -3844,21 +3989,85 @@ function getFileIconClass(name, isDir) {
   }
 }
 
-function showToast(type, message) {
+function showToast(type, message, options = {}) {
   const container = document.getElementById('toastContainer');
-  const toast = document.createElement('div');
+  if (!container) return null;
+
+  // Prune container if there are more than 5 non-process toasts
+  const existingToasts = container.querySelectorAll('.toast:not(.process)');
+  if (existingToasts.length >= 5) {
+    existingToasts[0].remove();
+  }
+
+  const toastId = options.id || `toast_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+  let toast = options.id ? document.getElementById(options.id) : null;
+
+  if (!toast) {
+    toast = document.createElement('div');
+    toast.id = toastId;
+    container.appendChild(toast);
+  }
+
   toast.className = `toast ${type}`;
 
-  const icon = type === 'success' ? 'fa-circle-check' : type === 'error' ? 'fa-triangle-exclamation' : 'fa-circle-info';
-  toast.innerHTML = `<i class="fa-solid ${icon}"></i><span>${escapeHtml(message)}</span>`;
-  container.appendChild(toast);
+  const icon = type === 'success' ? 'fa-circle-check'
+    : type === 'error' ? 'fa-triangle-exclamation'
+    : type === 'warning' ? 'fa-circle-exclamation'
+    : type === 'process' ? 'fa-arrow-right-arrow-left fa-spin'
+    : 'fa-circle-info';
 
+  const titleText = options.title || (
+    type === 'success' ? 'Success'
+    : type === 'error' ? 'Error'
+    : type === 'warning' ? 'Notice'
+    : type === 'process' ? 'Transfer in Progress'
+    : 'Information'
+  );
+
+  let html = `
+    <div class="toast-header">
+      <i class="fa-solid ${icon} toast-icon"></i>
+      <span class="toast-title">${escapeHtml(titleText)}</span>
+      <button class="toast-close-btn" onclick="dismissToast('${toastId}')" title="Dismiss">
+        <i class="fa-solid fa-xmark"></i>
+      </button>
+    </div>
+    <div class="toast-body">${options.isHtml ? message : escapeHtml(message)}</div>
+  `;
+
+  if (options.progress !== undefined) {
+    const pct = Math.min(100, Math.max(0, Math.round(options.progress)));
+    html += `
+      <div class="toast-progress-track">
+        <div class="toast-progress-fill" style="width: ${pct}%"></div>
+      </div>
+    `;
+  }
+
+  if (options.meta) {
+    html += `<div class="toast-meta">${options.meta}</div>`;
+  }
+
+  toast.innerHTML = html;
+
+  if (type !== 'process') {
+    const duration = options.duration || (type === 'error' ? 6000 : 4000);
+    clearTimeout(toast._dismissTimer);
+    toast._dismissTimer = setTimeout(() => dismissToast(toastId), duration);
+  }
+
+  return toastId;
+}
+
+function dismissToast(toastId) {
+  const toast = document.getElementById(toastId);
+  if (!toast) return;
+  clearTimeout(toast._dismissTimer);
+  toast.style.opacity = '0';
+  toast.style.transform = 'translateY(10px) scale(0.95)';
   setTimeout(() => {
-    toast.style.opacity = '0';
-    toast.style.transform = 'translateY(10px)';
-    toast.style.transition = 'all 0.3s';
-    setTimeout(() => toast.remove(), 300);
-  }, 3500);
+    if (toast.parentNode) toast.parentNode.removeChild(toast);
+  }, 250);
 }
 
 function formatBytes(bytes) {

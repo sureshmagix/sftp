@@ -51,6 +51,8 @@ export interface TransferProgress {
   totalFormatted?: string;
   startTime?: number;
   endTime?: number;
+  batchId?: string;
+  retries?: number;
 }
 
 export interface TransferOptions {

@@ -178,6 +178,13 @@ export class SftpClientService {
     const sftp = await this.getSftp();
     const stats = await fs.promises.stat(localPath);
     const totalSize = stats.size;
+
+    // Ensure remote parent directory exists before writing
+    const dir = path.posix.dirname(remotePath);
+    if (dir && dir !== '.' && dir !== '/') {
+      await this.mkdir(dir, true);
+    }
+
     const readStream = fs.createReadStream(localPath);
     const writeStream = sftp.createWriteStream(remotePath);
     let transferred = 0;
@@ -197,6 +204,20 @@ export class SftpClientService {
         throw abortError;
       }
       throw new Error(`Upload failed for '${localPath}' -> '${remotePath}': ${err.message}`);
+    }
+
+    // Verify consistency: verify uploaded file matches size if totalSize > 0
+    if (totalSize > 0) {
+      try {
+        const remoteStat = await this.stat(remotePath);
+        if (remoteStat.size !== totalSize) {
+          throw new Error(`Upload verification failed: expected ${totalSize} bytes, got ${remoteStat.size} bytes`);
+        }
+      } catch (verr: any) {
+        if (verr.message?.includes('Upload verification failed')) {
+          throw verr;
+        }
+      }
     }
   }
 
@@ -297,6 +318,14 @@ export class SftpClientService {
       }
       throw new Error(`Download failed for '${remotePath}' -> '${localPath}': ${err.message}`);
     }
+
+    // Verify consistency: verify downloaded file matches size if totalSize > 0
+    if (totalSize > 0) {
+      const localStat = await fs.promises.stat(localPath);
+      if (localStat.size !== totalSize) {
+        throw new Error(`Download verification failed: expected ${totalSize} bytes, got ${localStat.size} bytes`);
+      }
+    }
   }
 
   /**
@@ -308,7 +337,12 @@ export class SftpClientService {
     if (!recursive) {
       return new Promise((resolve, reject) => {
         sftp.mkdir(remotePath, (err) => {
-          if (err && (err as any).code !== 4) { // Ignore SSH_FX_FAILURE if already exists
+          if (err) {
+            const code = (err as any).code;
+            const msg = (err.message || '').toLowerCase();
+            if (code === 4 || msg.includes('exist') || msg.includes('failure')) {
+              return resolve();
+            }
             return reject(new Error(`Failed to create directory '${remotePath}': ${err.message}`));
           }
           resolve();
@@ -326,7 +360,12 @@ export class SftpClientService {
       if (!isExist) {
         await new Promise<void>((resolve, reject) => {
           sftp.mkdir(current, (err) => {
-            if (err && (err as any).code !== 4) {
+            if (err) {
+              const code = (err as any).code;
+              const msg = (err.message || '').toLowerCase();
+              if (code === 4 || msg.includes('exist') || msg.includes('failure')) {
+                return resolve();
+              }
               return reject(new Error(`Failed to create directory '${current}': ${err.message}`));
             }
             resolve();
