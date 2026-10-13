@@ -4,7 +4,7 @@
 
 Built with TypeScript, Express, WebSockets, SSH2, and Electron.
 
-Current release: **v1.3.0**
+Current release: **v1.3.1**
 
 ---
 
@@ -112,6 +112,14 @@ npm audit
 - SSH passwords are kept in memory for the current session only and are excluded from local storage and profile exports.
 - SSH host keys require a verified SHA-256 fingerprint, preventing silent man-in-the-middle connections.
 - LAN mode is disabled by default. Set `SFTP_ALLOW_LAN=true` only on a trusted network with appropriate host firewall rules.
+
+## 🏷️ v1.3.1 Release Highlights
+
+- **Auto-Closing Transfer Dialog Window**:
+  - Automatically dismisses the external animated Transfer Popout window (`#transferPopoutModal`) upon successful completion or evacuation of all items in the transfer queue.
+  - Ensures transfer queue status updates reliably trigger window dismissal across progress polling and WebSocket notifications.
+- **Universal Version Visibility (v1.3.1)**:
+  - Header badge, window title, About dialogue, and `/api/server-info` updated to `v1.3.1`.
 
 ## 🏷️ v1.3.0 Release Highlights
 

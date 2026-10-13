@@ -33,7 +33,7 @@ async function createWindow(launchUrl: string) {
     height: 860,
     minWidth: 1024,
     minHeight: 680,
-    title: 'SB SFTP Studio v1.3.0',
+    title: 'SB SFTP Studio v1.3.1',
     icon: getAppIconPath(),
     backgroundColor: '#0a0d14',
     show: true,

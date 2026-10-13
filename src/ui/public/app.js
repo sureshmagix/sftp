@@ -1,5 +1,5 @@
 // Global Application State & Version
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.3.1';
 let currentLocalPath = '';
 let currentRemotePath = '.';
 let localHomePath = '';
@@ -101,6 +101,7 @@ function removeTransferProcessToast() {
 
 function notifyAllTransfersCompleted(stats) {
   removeTransferProcessToast();
+  updateTransferPopout([]);
 
   const now = Date.now();
   if (now - lastTransferCompleteToastTime < 1000) return;
@@ -1231,6 +1232,7 @@ function initWebSocket() {
           wasTransferring = false;
           notifyAllTransfersCompleted(transferBatchTracker);
         }
+        updateTransferPopout([]);
         silentSyncAll();
       } else if (data.type === 'connection-status') {
         updateConnectionUI(data.status);
@@ -3557,6 +3559,9 @@ function renderTransfersList(tasks) {
 }
 
 function updateTransferHud(activeTasks) {
+  // Synchronize Live Animated Transfer Popout
+  updateTransferPopout(activeTasks);
+
   const hud = document.getElementById('transferHud');
   if (!hud) return;
 
@@ -3604,9 +3609,6 @@ function updateTransferHud(activeTasks) {
 
   const hudPctText = document.getElementById('hudPctText');
   if (hudPctText) hudPctText.innerText = `${currentTask.percentage}%`;
-
-  // Synchronize Live Animated Transfer Popout
-  updateTransferPopout(activeTasks);
 }
 
 function openTransferPopout() {
@@ -3630,9 +3632,7 @@ function updateTransferPopout(activeTasks) {
   if (!modal) return;
 
   if (!activeTasks || activeTasks.length === 0) {
-    if (modal.style.display !== 'none' && !isTransferPopoutMinimized) {
-      modal.style.display = 'none';
-    }
+    modal.style.display = 'none';
     isTransferPopoutMinimized = false;
     currentActiveTaskId = null;
     return;

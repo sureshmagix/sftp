@@ -217,7 +217,7 @@ export class SftpWebServer {
         : '127.0.0.1';
 
       res.json({
-        version: '1.3.0',
+        version: '1.3.1',
         hostname: os.hostname(),
         platform: os.platform(),
         arch: os.arch(),

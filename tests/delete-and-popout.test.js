@@ -69,12 +69,12 @@ test('LocalFsService: deletes files and nested directories properly even if type
   }
 });
 
-test('UI and Package: version 1.3.0 and transfer telemetry elements are visible in HTML and scripts', async () => {
+test('UI and Package: version 1.3.1 and transfer telemetry elements are visible in HTML and scripts', async () => {
   const pkg = JSON.parse(await fs.promises.readFile(path.join(__dirname, '..', 'package.json'), 'utf8'));
-  assert.equal(pkg.version, '1.3.0');
+  assert.equal(pkg.version, '1.3.1');
 
   const html = await fs.promises.readFile(path.join(__dirname, '..', 'src', 'ui', 'public', 'index.html'), 'utf8');
-  assert.ok(html.includes('v1.3.0'));
+  assert.ok(html.includes('v1.3.1'));
   assert.ok(html.includes('transferPopoutModal'));
   assert.ok(html.includes('btnPopoutCancel'));
   assert.ok(html.includes('btnHudCancel'));
