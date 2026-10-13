@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SB SFTP Studio - Multi-Client SSH & SFTP Manager</title>
+  <title>SB SFTP Studio v1.3.0 - Multi-Client SSH & SFTP Manager</title>
   <link rel="icon" type="image/png" href="assets/logo.png">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -19,7 +19,10 @@
         <div class="logo">
           <img src="assets/logo.png" alt="SB SFTP Logo" class="app-logo-img">
           <div class="logo-text">
-            <span class="logo-title">SB SFTP Studio</span>
+            <div class="logo-title-row">
+              <span class="logo-title">SB SFTP Studio</span>
+              <span class="app-version-badge" id="appVersionBadge">v1.3.0</span>
+            </div>
             <span class="logo-subtitle">Multi-Client Remote SSH & SFTP Hub</span>
           </div>
         </div>
@@ -391,9 +394,188 @@
           </div>
           <span class="hud-pct-text" id="hudPctText">0%</span>
         </div>
+        <button class="btn-hud-cancel" id="btnHudCancel" onclick="cancelCurrentActiveTransfer()" title="Cancel Active Transfer">
+          <i class="fa-solid fa-xmark"></i> Cancel
+        </button>
+        <button class="btn-hud-expand" onclick="openTransferPopout()" title="Open Animated Transfer Popout">
+          <i class="fa-solid fa-expand"></i>
+        </button>
         <button class="btn-hud-dock" onclick="switchDockTab('transfers')" title="Open Transfers Dock">
           <i class="fa-solid fa-arrow-up-right-from-square"></i>
         </button>
+      </div>
+    </div>
+
+    <!-- Live Animated Transfer Popout Dialog / Modal with Bigger Animation & Cancel Control -->
+    <div class="transfer-popout-overlay" id="transferPopoutModal" style="display: none;">
+      <div class="transfer-popout-card">
+        <div class="popout-header">
+          <div class="popout-header-left">
+            <div class="popout-icon-pulse">
+              <i class="fa-solid fa-arrows-rotate fa-spin text-accent" id="popoutHeaderSpin"></i>
+            </div>
+            <div class="popout-title-box">
+              <div class="popout-title-row">
+                <h3 id="popoutTitle">File Transfer in Progress</h3>
+                <span class="hud-badge-direction" id="popoutDirectionBadge"><i class="fa-solid fa-arrow-up"></i> UPLOADING</span>
+              </div>
+              <span class="popout-subtitle" id="popoutBatchSubtitle">1 active transfer in queue</span>
+            </div>
+          </div>
+          <div class="popout-header-right">
+            <button class="btn-popout-action" onclick="minimizeTransferPopout()" title="Minimize to bottom HUD">
+              <i class="fa-solid fa-window-minimize"></i>
+            </button>
+          </div>
+        </div>
+
+        <!-- Network Disconnection Warning Banner with Option to Continue Transfer -->
+        <div class="popout-network-alert" id="popoutNetworkAlert" style="display: none;">
+          <div class="network-alert-content">
+            <div class="network-alert-icon" id="popoutNetworkAlertIcon">
+              <i class="fa-solid fa-triangle-exclamation"></i>
+            </div>
+            <div class="network-alert-text">
+              <strong id="popoutNetworkTitle">Network Disconnected!</strong>
+              <span id="popoutNetworkDesc">Connection lost during transfer. Transfers paused. Waiting for connection to restore...</span>
+            </div>
+          </div>
+          <div class="network-alert-actions">
+            <button class="btn-popout-resume" id="btnPopoutResume" onclick="continueTransfers()">
+              <i class="fa-solid fa-play"></i> Continue Transfer
+            </button>
+          </div>
+        </div>
+
+        <div class="popout-body">
+          <!-- BIGGER ANIMATION STAGE -->
+          <div class="transfer-visual-stage" id="transferVisualStage">
+            <!-- Source Node -->
+            <div class="stage-node node-local" id="stageNodeLocal">
+              <div class="node-icon-wrap"><i class="fa-solid fa-laptop-code"></i></div>
+              <span class="node-label">Local Host</span>
+            </div>
+
+            <!-- Animated Energy Stream & Central Glowing Portal -->
+            <div class="stage-stream" id="stageStream">
+              <div class="stream-beam-line"></div>
+              <div class="stream-particles" id="streamParticles">
+                <span class="particle p1"></span>
+                <span class="particle p2"></span>
+                <span class="particle p3"></span>
+                <span class="particle p4"></span>
+                <span class="particle p5"></span>
+              </div>
+
+              <!-- Large Glowing Animated Central Orb -->
+              <div class="stage-orb" id="stageOrb">
+                <div class="orb-outer-ring"></div>
+                <div class="orb-inner-core">
+                  <i class="fa-solid fa-cloud-arrow-up" id="stageOrbIcon"></i>
+                </div>
+                <div class="orb-glow-aura"></div>
+              </div>
+            </div>
+
+            <!-- Destination Node -->
+            <div class="stage-node node-remote" id="stageNodeRemote">
+              <div class="node-icon-wrap"><i class="fa-solid fa-server"></i></div>
+              <span class="node-label">Remote Server</span>
+            </div>
+          </div>
+
+          <!-- File Details & Paths -->
+          <div class="popout-file-meta">
+            <div class="popout-filename-row">
+              <i class="fa-regular fa-file" id="popoutFileIcon"></i>
+              <span class="popout-filename" id="popoutFileName">filename.ext</span>
+              <span class="popout-pct-large" id="popoutPctLarge">0%</span>
+            </div>
+            <div class="popout-paths-box">
+              <div class="path-line"><span class="path-tag">SRC:</span> <code id="popoutSrcPath">/path/to/source</code></div>
+              <div class="path-line"><span class="path-tag">DST:</span> <code id="popoutDstPath">/path/to/destination</code></div>
+            </div>
+          </div>
+
+          <!-- Primary High-Res Progress Bar (Current File) -->
+          <div class="popout-progress-container">
+            <div class="popout-progress-header">
+              <span class="popout-progress-label"><i class="fa-solid fa-file-arrow-up"></i> Current File Progress</span>
+              <span class="popout-progress-val" id="popoutFileProgressVal">0%</span>
+            </div>
+            <div class="popout-progress-track">
+              <div class="popout-progress-fill" id="popoutProgressFill" style="width: 0%;">
+                <div class="popout-shimmer"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Secondary High-Res Progress Bar (Total Progress & Overall Time Remaining) -->
+          <div class="popout-progress-container popout-total-progress-container">
+            <div class="popout-progress-header">
+              <span class="popout-progress-label"><i class="fa-solid fa-layer-group"></i> Total Progress</span>
+              <div class="popout-total-meta">
+                <span class="popout-total-time" id="popoutTotalTimeRemaining"><i class="fa-regular fa-clock"></i> Time Remaining: --:--</span>
+                <span class="popout-total-pct-large" id="popoutTotalPctLarge">0%</span>
+              </div>
+            </div>
+            <div class="popout-progress-track popout-total-track">
+              <div class="popout-progress-fill popout-total-fill" id="popoutTotalProgressFill" style="width: 0%;">
+                <div class="popout-shimmer"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Telemetry Stats Grid (Total, Transferred, Remaining Size & Speeds) -->
+          <div class="popout-stats-grid">
+            <div class="stat-pill">
+              <span class="stat-lbl"><i class="fa-solid fa-box-archive"></i> Total Size</span>
+              <span class="stat-val" id="popoutTotalSizeStat">0 B</span>
+            </div>
+            <div class="stat-pill">
+              <span class="stat-lbl"><i class="fa-solid fa-circle-check text-accent"></i> Transferred</span>
+              <span class="stat-val" id="popoutTransferredStat">0 B</span>
+              <span id="popoutSizeStat" style="display: none;">0 B / 0 B</span>
+            </div>
+            <div class="stat-pill highlight-remaining">
+              <span class="stat-lbl"><i class="fa-solid fa-hourglass-half"></i> Remaining Size</span>
+              <span class="stat-val stat-val-remaining" id="popoutRemainingSizeStat">0 B</span>
+            </div>
+            <div class="stat-pill">
+              <span class="stat-lbl"><i class="fa-solid fa-bolt text-accent"></i> Speed</span>
+              <span class="stat-val text-accent" id="popoutSpeedStat">0 B/s</span>
+            </div>
+            <div class="stat-pill">
+              <span class="stat-lbl"><i class="fa-regular fa-clock"></i> File ETA</span>
+              <span class="stat-val" id="popoutEtaStat">--:--</span>
+            </div>
+            <div class="stat-pill">
+              <span class="stat-lbl"><i class="fa-solid fa-stopwatch"></i> Total ETA</span>
+              <span class="stat-val" id="popoutTotalEtaStat">--:--</span>
+            </div>
+            <div class="stat-pill">
+              <span class="stat-lbl"><i class="fa-solid fa-list-check"></i> Queue Items</span>
+              <span class="stat-val" id="popoutQueueStat">1 item</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Action Controls with Provision to Cancel -->
+        <div class="popout-footer">
+          <div class="popout-footer-left">
+            <button class="btn-popout-bg" onclick="minimizeTransferPopout()" title="Keep running transfer in background">
+              <i class="fa-solid fa-arrow-down-to-bracket"></i> Run in Background
+            </button>
+          </div>
+          <div class="popout-footer-right">
+            <button class="btn-popout-cancel" id="btnPopoutCancel" onclick="cancelCurrentActiveTransfer()">
+              <i class="fa-solid fa-xmark"></i> Cancel Transfer
+            </button>
+            <button class="btn-popout-cancel-all" id="btnPopoutCancelAll" onclick="cancelAllTransfers()" style="display: none;">
+              <i class="fa-solid fa-ban"></i> Cancel All (<span id="popoutCancelAllCount">0</span>)
+            </button>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -824,10 +1006,34 @@
             </div>
           </div>
         </div>
+
+        <!-- About & Version Information Section -->
+        <div class="settings-section about-studio-section">
+          <h4><i class="fa-solid fa-circle-info"></i> About SB SFTP Studio</h4>
+          <div class="about-studio-card">
+            <div class="about-logo-meta">
+              <img src="assets/logo.png" alt="Logo" class="about-logo-mini">
+              <div>
+                <strong class="about-title">SB SFTP Studio <span class="app-version-badge">v1.3.0</span></strong>
+                <span class="about-desc">Multi-Client Remote SSH & SFTP Desktop Studio</span>
+              </div>
+            </div>
+            <div class="about-badge-row">
+              <span class="app-version-pill"><i class="fa-solid fa-tag"></i> Version: <strong class="app-version-text">1.3.0</strong></span>
+              <span class="about-pill"><i class="fa-solid fa-shield-halved"></i> Production Studio</span>
+              <span class="about-pill"><i class="fa-solid fa-code-branch"></i> Stable 2026</span>
+            </div>
+          </div>
+        </div>
       </div>
 
       <div class="modal-footer">
-        <button class="btn btn-primary" onclick="closePreferencesModal()">Done</button>
+        <div class="modal-footer-left">
+          <span class="version-label-mini"><i class="fa-solid fa-cube"></i> Studio <span class="app-version-text">v1.3.0</span></span>
+        </div>
+        <div class="modal-footer-right">
+          <button class="btn btn-primary" onclick="closePreferencesModal()">Done</button>
+        </div>
       </div>
     </div>
   </div>
@@ -877,10 +1083,15 @@
       </div>
 
       <div class="modal-footer">
-        <button class="btn btn-secondary" onclick="closePortModal()">Cancel</button>
-        <button class="btn btn-primary" onclick="submitPortChange()" id="btnSubmitPort">
-          <i class="fa-solid fa-arrows-rotate"></i> Update & Switch Port
-        </button>
+        <div class="modal-footer-left">
+          <span class="version-label-mini"><i class="fa-solid fa-cube"></i> Studio <span class="app-version-text">v1.3.0</span></span>
+        </div>
+        <div class="modal-footer-right">
+          <button class="btn btn-secondary" onclick="closePortModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="submitPortChange()" id="btnSubmitPort">
+            <i class="fa-solid fa-arrows-rotate"></i> Update & Switch Port
+          </button>
+        </div>
       </div>
     </div>
   </div>

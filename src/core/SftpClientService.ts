@@ -376,18 +376,40 @@ export class SftpClientService {
   }
 
   /**
-   * Delete a remote file
+   * Delete a remote file (falls back to rmdir if path is a directory)
    */
   public async deleteFile(remotePath: string): Promise<void> {
     const sftp = await this.getSftp();
     return new Promise((resolve, reject) => {
-      sftp.unlink(remotePath, (err) => {
+      sftp.unlink(remotePath, async (err) => {
         if (err) {
+          // If unlink fails because it is a directory, handle gracefully
+          try {
+            const st = await this.stat(remotePath);
+            if (st.type === 'directory') {
+              await this.rmdir(remotePath, true);
+              return resolve();
+            }
+          } catch (_) {}
           return reject(new Error(`Failed to delete file '${remotePath}': ${err.message}`));
         }
         resolve();
       });
     });
+  }
+
+  /**
+   * Delete a remote item (file or directory) automatically inspecting its type
+   */
+  public async deleteItem(remotePath: string): Promise<void> {
+    try {
+      const st = await this.stat(remotePath);
+      if (st.type === 'directory') {
+        await this.rmdir(remotePath, true);
+        return;
+      }
+    } catch (_) {}
+    await this.deleteFile(remotePath);
   }
 
   /**

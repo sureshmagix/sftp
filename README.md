@@ -4,7 +4,7 @@
 
 Built with TypeScript, Express, WebSockets, SSH2, and Electron.
 
-Current release: **v1.2.0**
+Current release: **v1.3.0**
 
 ---
 
@@ -112,6 +112,21 @@ npm audit
 - SSH passwords are kept in memory for the current session only and are excluded from local storage and profile exports.
 - SSH host keys require a verified SHA-256 fingerprint, preventing silent man-in-the-middle connections.
 - LAN mode is disabled by default. Set `SFTP_ALLOW_LAN=true` only on a trusted network with appropriate host firewall rules.
+
+## 🏷️ v1.3.0 Release Highlights
+
+- **Universal Folder and File Deletion**:
+  - Robust deletion of both files and directory trees (including nested structures and batch selections) across local filesystem and remote SFTP.
+  - Automatic detection and fallback between file unlinking and recursive directory removal (`rmdir`) on both client and server.
+  - Batch deletion correctly resolves selected folders and files regardless of cache or path formatting nuances.
+- **Enhanced Live Transfer Popout Dialog & Cancellation Controls**:
+  - Prominent animated Transfer Popout dialog with larger multi-stage visual transfer graphics, glowing nodes, and directional energy flow.
+  - Live real-time stats including transferred bytes, total size, throughput speed, remaining ETA, and queue count.
+  - Direct, accessible provision to **Cancel Transfer** on active items as well as **Cancel All** for queued batch jobs directly within the popout and HUD.
+  - Option to minimize the popout to background while continuing to browse local or remote directories.
+- **Universal Version Visibility (v1.3.0)**:
+  - App header logo, page document title, Electron native title bar, Preferences / About modal, and Server & Network dialog all visibly display `v1.3.0`.
+  - System version dynamically exposed through `/api/server-info`.
 
 ## 🏷️ v1.2.0 Release Highlights
 

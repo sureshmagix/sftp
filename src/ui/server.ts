@@ -217,6 +217,7 @@ export class SftpWebServer {
         : '127.0.0.1';
 
       res.json({
+        version: '1.3.0',
         hostname: os.hostname(),
         platform: os.platform(),
         arch: os.arch(),
@@ -432,10 +433,12 @@ export class SftpWebServer {
       let { localPath, isDirectory } = req.body;
       if (localPath) localPath = localPath.replace(/\\/g, '/');
       try {
-        if (isDirectory) {
+        if (isDirectory === true) {
           await this.controller.localFsService.rmdir(localPath, true);
-        } else {
+        } else if (isDirectory === false) {
           await this.controller.localFsService.deleteFile(localPath);
+        } else {
+          await this.controller.localFsService.deleteItem(localPath);
         }
         res.json({ success: true });
       } catch (err: any) {
@@ -525,10 +528,10 @@ export class SftpWebServer {
     this.app.post('/api/delete-remote', async (req: Request, res: Response) => {
       const { remotePath, isDirectory } = req.body;
       try {
-        if (isDirectory) {
+        if (isDirectory === true) {
           await this.controller.sftpService.rmdir(remotePath, true);
         } else {
-          await this.controller.sftpService.deleteFile(remotePath);
+          await this.controller.sftpService.deleteItem(remotePath);
         }
         res.json({ success: true });
       } catch (err: any) {
@@ -546,10 +549,10 @@ export class SftpWebServer {
       const errors: string[] = [];
       for (const item of items) {
         try {
-          if (item.isDirectory) {
+          if (item.isDirectory === true) {
             await this.controller.sftpService.rmdir(item.remotePath, true);
           } else {
-            await this.controller.sftpService.deleteFile(item.remotePath);
+            await this.controller.sftpService.deleteItem(item.remotePath);
           }
           deletedCount++;
         } catch (err: any) {
@@ -570,10 +573,10 @@ export class SftpWebServer {
       for (const item of items) {
         try {
           const p = (item.localPath || '').replace(/\\/g, '/');
-          if (item.isDirectory) {
+          if (item.isDirectory === true) {
             await this.controller.localFsService.rmdir(p, true);
           } else {
-            await this.controller.localFsService.deleteFile(p);
+            await this.controller.localFsService.deleteItem(p);
           }
           deletedCount++;
         } catch (err: any) {
@@ -744,6 +747,31 @@ export class SftpWebServer {
         return res.status(409).json({ success: false, result, error: 'Transfer has already finished' });
       }
       res.status(result === 'cancellation-requested' ? 202 : 200).json({ success: true, result });
+    });
+
+    // Transfer Queue: Cancel all tasks
+    this.app.post('/api/cancel-all-transfers', (_req: Request, res: Response) => {
+      this.controller.transferManager.cancelAll();
+      res.json({ success: true, message: 'All transfers cancelled' });
+    });
+
+    // Transfer Queue: Retry single task
+    this.app.post('/api/retry-transfer', (req: Request, res: Response) => {
+      const { taskId } = req.body;
+      if (typeof taskId !== 'string' || !taskId) {
+        return res.status(400).json({ success: false, error: 'taskId is required' });
+      }
+      const retried = this.controller.transferManager.retryTask(taskId);
+      if (!retried) {
+        return res.status(404).json({ success: false, error: 'Transfer task not found or already active' });
+      }
+      res.json({ success: true, message: 'Task requeued for transfer' });
+    });
+
+    // Transfer Queue: Continue / Retry all failed or interrupted transfers
+    this.app.post('/api/retry-failed-transfers', (_req: Request, res: Response) => {
+      const count = this.controller.transferManager.retryFailed();
+      res.json({ success: true, retriedCount: count, message: `${count} transfer task(s) resumed` });
     });
 
     // Direct Browser File/Folder Stream Upload

@@ -1,4 +1,5 @@
-// Global Application State
+// Global Application State & Version
+const APP_VERSION = '1.3.0';
 let currentLocalPath = '';
 let currentRemotePath = '.';
 let localHomePath = '';
@@ -11,6 +12,10 @@ let currentServerPort = 3000;
 let primaryServerIp = '127.0.0.1';
 let commandHistory = [];
 let historyIndex = -1;
+
+// Transfer Popout State
+let isTransferPopoutMinimized = false;
+let currentActiveTaskId = null;
 
 // Multi-Selection & Active Panel State
 let selectedLocalPaths = new Set();
@@ -276,6 +281,8 @@ document.addEventListener('DOMContentLoaded', () => {
   initDragAndDrop();
   initFloatingWindowDrag();
   window.addEventListener('resize', updateTerminalDimensions);
+  window.addEventListener('offline', () => handleNetworkStatusChange(false));
+  window.addEventListener('online', () => handleNetworkStatusChange(true));
   window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && isTerminalDetached) {
       dockTerminal();
@@ -812,6 +819,15 @@ async function initServerInfo() {
     document.getElementById('displayServerPort').innerText = currentServerPort;
     document.getElementById('newPortInput').value = currentServerPort;
 
+    // Update Version Across UI
+    const appVer = data.version || APP_VERSION;
+    document.querySelectorAll('.app-version-text').forEach(el => el.innerText = appVer);
+    const badge = document.getElementById('appVersionBadge');
+    if (badge) badge.innerText = `v${appVer}`;
+    if (!document.title.includes(appVer)) {
+      document.title = `SB SFTP Studio v${appVer} - Multi-Client SSH & SFTP Manager`;
+    }
+
     // Populate Modal IP List
     renderIpAddressList(data.ipAddresses, currentServerPort);
   } catch (err) {
@@ -1197,6 +1213,10 @@ function initWebSocket() {
             title: '✕ Transfer Failed',
             duration: 6000,
           });
+          const errStr = (task.error || '').toLowerCase();
+          if (!navigator.onLine || errStr.includes('closed') || errStr.includes('econn') || errStr.includes('timeout') || errStr.includes('network')) {
+            showTransferNetworkDisconnectionAlert(`Transfer interrupted: ${task.fileName} failed due to network disconnect.`);
+          }
         }
       } else if (data.type === 'task-retry') {
         const task = data.task;
@@ -1219,17 +1239,28 @@ function initWebSocket() {
             title: '📡 Reconnecting to Server',
             duration: 4000,
           });
+          const hasTransfers = (activeTransfersCache || []).some(t => ['transferring', 'queued', 'cancelling', 'failed'].includes(t.status));
+          if (hasTransfers) {
+            showTransferNetworkDisconnectionAlert('Connection to SSH server lost. Auto-reconnecting in background...');
+          }
         } else if (data.status === 'connected') {
           showToast('success', 'SSH and SFTP connection restored.', {
             title: '🟢 Connected',
             duration: 3500,
           });
+          handleNetworkStatusChange(true);
           silentSyncAll();
-        } else if (data.status === 'error' && data.error) {
-          showToast('error', data.error, {
-            title: 'Connection Error',
-            duration: 5000,
-          });
+        } else if (data.status === 'disconnected' || data.status === 'error') {
+          if (data.status === 'error' && data.error) {
+            showToast('error', data.error, {
+              title: 'Connection Error',
+              duration: 5000,
+            });
+          }
+          const hasTransfers = (activeTransfersCache || []).some(t => ['transferring', 'queued', 'cancelling', 'failed'].includes(t.status));
+          if (hasTransfers) {
+            showTransferNetworkDisconnectionAlert(data.error || 'Network or SSH connection lost during file transfer.');
+          }
         }
       } else if (data.type === 'heartbeat') {
         // Heartbeat keep-alive active
@@ -1240,6 +1271,10 @@ function initWebSocket() {
   };
 
   ws.onclose = () => {
+    const hasTransfers = (activeTransfersCache || []).some(t => ['transferring', 'queued', 'cancelling'].includes(t.status));
+    if (hasTransfers || !navigator.onLine) {
+      handleNetworkStatusChange(false);
+    }
     setTimeout(initWebSocket, 3000);
   };
 }
@@ -2026,11 +2061,14 @@ async function deleteSelectedItems(panel) {
 
   const items = Array.from(selSet).map(p => {
     const name = getPathBaseName(p);
-    const cached = fileCache.find(f => joinPath(currentPath, f.name) === p || f.name === name);
-    const isDirectory = cached ? cached.type === 'directory' : false;
+    const rowEl = document.querySelector(`tr[data-panel="${panel}"][data-path="${CSS.escape(p)}"]`) ||
+                  document.querySelector(`tr[data-panel="${panel}"][data-name="${CSS.escape(name)}"]`);
+    const domType = rowEl ? rowEl.getAttribute('data-type') : null;
+    const cached = fileCache.find(f => f.path === p || joinPath(currentPath, f.name) === p || f.name === name || normalizePath(f.path) === normalizePath(p));
+    const isDirectory = domType ? (domType === 'directory') : (cached ? cached.type === 'directory' : undefined);
     return panel === 'local'
-      ? { localPath: p, isDirectory }
-      : { remotePath: p, isDirectory };
+      ? { localPath: normalizePath(p), isDirectory }
+      : { remotePath: normalizePath(p), isDirectory };
   });
 
   showToast('info', `Deleting ${count} ${panel} item(s)...`);
@@ -2368,7 +2406,13 @@ async function promptCreateLocalDir() {
 }
 
 async function deleteLocalItem(localPath, isDirectory) {
-  const itemType = isDirectory ? 'folder' : 'file';
+  if (typeof isDirectory !== 'boolean') {
+    const rowEl = document.querySelector(`tr[data-panel="local"][data-path="${CSS.escape(localPath)}"]`);
+    const domType = rowEl ? rowEl.getAttribute('data-type') : null;
+    const cached = localFilesCache.find(f => f.path === localPath || joinPath(currentLocalPath, f.name) === localPath || f.name === getPathBaseName(localPath));
+    isDirectory = domType ? (domType === 'directory') : (cached ? cached.type === 'directory' : undefined);
+  }
+  const itemType = isDirectory === true ? 'folder' : (isDirectory === false ? 'file' : 'item');
   const name = getPathBaseName(localPath);
   if (!confirm(`Are you sure you want to permanently delete local ${itemType} "${name}"?`)) return;
   try {
@@ -2536,7 +2580,13 @@ async function promptCreateRemoteDir() {
 }
 
 async function deleteRemoteItem(remotePath, isDirectory) {
-  const itemType = isDirectory ? 'folder' : 'file';
+  if (typeof isDirectory !== 'boolean') {
+    const rowEl = document.querySelector(`tr[data-panel="remote"][data-path="${CSS.escape(remotePath)}"]`);
+    const domType = rowEl ? rowEl.getAttribute('data-type') : null;
+    const cached = remoteFilesCache.find(f => f.path === remotePath || joinPath(currentRemotePath, f.name) === remotePath || f.name === getPathBaseName(remotePath));
+    isDirectory = domType ? (domType === 'directory') : (cached ? cached.type === 'directory' : undefined);
+  }
+  const itemType = isDirectory === true ? 'folder' : (isDirectory === false ? 'file' : 'item');
   const name = getPathBaseName(remotePath);
   if (!confirm(`Are you sure you want to permanently delete remote ${itemType} "${name}"?`)) return;
   try {
@@ -3554,6 +3604,389 @@ function updateTransferHud(activeTasks) {
 
   const hudPctText = document.getElementById('hudPctText');
   if (hudPctText) hudPctText.innerText = `${currentTask.percentage}%`;
+
+  // Synchronize Live Animated Transfer Popout
+  updateTransferPopout(activeTasks);
+}
+
+function openTransferPopout() {
+  const modal = document.getElementById('transferPopoutModal');
+  if (modal) {
+    modal.style.display = 'flex';
+    isTransferPopoutMinimized = false;
+  }
+}
+
+function minimizeTransferPopout() {
+  const modal = document.getElementById('transferPopoutModal');
+  if (modal) {
+    modal.style.display = 'none';
+    isTransferPopoutMinimized = true;
+  }
+}
+
+function updateTransferPopout(activeTasks) {
+  const modal = document.getElementById('transferPopoutModal');
+  if (!modal) return;
+
+  if (!activeTasks || activeTasks.length === 0) {
+    if (modal.style.display !== 'none' && !isTransferPopoutMinimized) {
+      modal.style.display = 'none';
+    }
+    isTransferPopoutMinimized = false;
+    currentActiveTaskId = null;
+    return;
+  }
+
+  // Auto-open popout if not explicitly minimized by user
+  if (!isTransferPopoutMinimized && modal.style.display === 'none') {
+    modal.style.display = 'flex';
+  }
+
+  const currentTask = activeTasks.find(t => t.status === 'transferring') || activeTasks[0];
+  if (!currentTask) return;
+  currentActiveTaskId = currentTask.id;
+
+  const isUp = currentTask.direction === 'upload';
+  const stage = document.getElementById('transferVisualStage');
+  if (stage) {
+    stage.className = isUp ? 'transfer-visual-stage upload-direction' : 'transfer-visual-stage download-direction';
+  }
+
+  const nodeLocal = document.getElementById('stageNodeLocal');
+  const nodeRemote = document.getElementById('stageNodeRemote');
+  if (nodeLocal && nodeRemote) {
+    if (isUp) {
+      nodeLocal.className = 'stage-node node-local active-source';
+      nodeRemote.className = 'stage-node node-remote active-dest';
+    } else {
+      nodeLocal.className = 'stage-node node-local active-dest';
+      nodeRemote.className = 'stage-node node-remote active-source';
+    }
+  }
+
+  const popoutDirectionBadge = document.getElementById('popoutDirectionBadge');
+  if (popoutDirectionBadge) {
+    popoutDirectionBadge.className = isUp ? 'hud-badge-direction' : 'hud-badge-direction download';
+    popoutDirectionBadge.innerHTML = isUp ? '<i class="fa-solid fa-arrow-up"></i> UPLOADING' : '<i class="fa-solid fa-arrow-down"></i> DOWNLOADING';
+  }
+
+  const stageOrbIcon = document.getElementById('stageOrbIcon');
+  if (stageOrbIcon) {
+    stageOrbIcon.className = isUp ? 'fa-solid fa-cloud-arrow-up' : 'fa-solid fa-cloud-arrow-down';
+  }
+
+  const popoutFileName = document.getElementById('popoutFileName');
+  if (popoutFileName) popoutFileName.innerText = currentTask.fileName;
+
+  const popoutFileIcon = document.getElementById('popoutFileIcon');
+  if (popoutFileIcon) {
+    const isDir = currentTask.fileName.includes('/') || currentTask.fileName.includes('\\');
+    popoutFileIcon.className = isDir ? 'fa-solid fa-folder text-accent' : getFileIconClass(currentTask.fileName, false);
+  }
+
+  const popoutSrcPath = document.getElementById('popoutSrcPath');
+  if (popoutSrcPath) popoutSrcPath.innerText = isUp ? currentTask.localPath : currentTask.remotePath;
+
+  const popoutDstPath = document.getElementById('popoutDstPath');
+  if (popoutDstPath) popoutDstPath.innerText = isUp ? currentTask.remotePath : currentTask.localPath;
+
+  // 1. Current File Progress
+  const popoutPctLarge = document.getElementById('popoutPctLarge');
+  if (popoutPctLarge) popoutPctLarge.innerText = `${currentTask.percentage}%`;
+
+  const popoutFileProgressVal = document.getElementById('popoutFileProgressVal');
+  if (popoutFileProgressVal) popoutFileProgressVal.innerText = `${currentTask.percentage}%`;
+
+  const popoutProgressFill = document.getElementById('popoutProgressFill');
+  if (popoutProgressFill) popoutProgressFill.style.width = `${currentTask.percentage}%`;
+
+  // 2. Aggregate Batch & Total Size Calculations
+  const allKnownTasks = activeTransfersCache || [];
+  const totalBatchBytes = Math.max(
+    transferBatchTracker.totalBytes || 0,
+    allKnownTasks.reduce((sum, t) => sum + (t.totalBytes || 0), 0)
+  );
+
+  const transferredBatchBytes = allKnownTasks.reduce((sum, t) => {
+    if (t.status === 'completed') return sum + (t.totalBytes || 0);
+    if (t.status === 'transferring' || t.status === 'cancelling') return sum + (t.transferredBytes || 0);
+    return sum;
+  }, 0);
+
+  const remainingBatchBytes = Math.max(0, totalBatchBytes - transferredBatchBytes);
+
+  let totalPercentage = 0;
+  if (totalBatchBytes > 0) {
+    totalPercentage = Math.min(100, Math.round((transferredBatchBytes / totalBatchBytes) * 100));
+  } else if (activeTasks.length === 0) {
+    totalPercentage = 100;
+  }
+
+  // Aggregate Speed and Total ETA
+  const speedBytesPerSec = currentTask.speedBytesPerSec || 0;
+  let totalEtaFormatted = '--:--';
+  if (speedBytesPerSec > 0 && remainingBatchBytes > 0) {
+    const totalEtaSeconds = Math.ceil(remainingBatchBytes / speedBytesPerSec);
+    totalEtaFormatted = formatDuration(totalEtaSeconds);
+  } else if (remainingBatchBytes === 0 && totalBatchBytes > 0) {
+    totalEtaFormatted = '0s';
+  }
+
+  // 3. Update Secondary Total Progress Bar & Overall Time Remaining
+  const popoutTotalPctLarge = document.getElementById('popoutTotalPctLarge');
+  if (popoutTotalPctLarge) popoutTotalPctLarge.innerText = `${totalPercentage}%`;
+
+  const popoutTotalProgressFill = document.getElementById('popoutTotalProgressFill');
+  if (popoutTotalProgressFill) popoutTotalProgressFill.style.width = `${totalPercentage}%`;
+
+  const popoutTotalTimeRemaining = document.getElementById('popoutTotalTimeRemaining');
+  if (popoutTotalTimeRemaining) {
+    popoutTotalTimeRemaining.innerHTML = `<i class="fa-regular fa-clock"></i> Time Remaining: ${totalEtaFormatted}`;
+  }
+
+  const popoutBatchSubtitle = document.getElementById('popoutBatchSubtitle');
+  if (popoutBatchSubtitle) {
+    popoutBatchSubtitle.innerText = `${activeTasks.length} active transfer${activeTasks.length > 1 ? 's' : ''} in progress • ${formatBytes(remainingBatchBytes)} remaining`;
+  }
+
+  // 4. Update Telemetry Stats Grid
+  const popoutTotalSizeStat = document.getElementById('popoutTotalSizeStat');
+  if (popoutTotalSizeStat) popoutTotalSizeStat.innerText = formatBytes(totalBatchBytes);
+
+  const popoutTransferredStat = document.getElementById('popoutTransferredStat');
+  if (popoutTransferredStat) popoutTransferredStat.innerText = formatBytes(transferredBatchBytes);
+
+  const popoutRemainingSizeStat = document.getElementById('popoutRemainingSizeStat');
+  if (popoutRemainingSizeStat) popoutRemainingSizeStat.innerText = `${formatBytes(remainingBatchBytes)} remaining`;
+
+  const popoutSizeStat = document.getElementById('popoutSizeStat');
+  if (popoutSizeStat) {
+    const trans = currentTask.transferredFormatted || formatBytes(currentTask.transferredBytes);
+    const tot = currentTask.totalFormatted || formatBytes(currentTask.totalBytes);
+    popoutSizeStat.innerText = `${trans} / ${tot}`;
+  }
+
+  const popoutSpeedStat = document.getElementById('popoutSpeedStat');
+  if (popoutSpeedStat) popoutSpeedStat.innerText = currentTask.speedFormatted || '0 B/s';
+
+  const popoutEtaStat = document.getElementById('popoutEtaStat');
+  if (popoutEtaStat) popoutEtaStat.innerText = currentTask.etaFormatted || '--:--';
+
+  const popoutTotalEtaStat = document.getElementById('popoutTotalEtaStat');
+  if (popoutTotalEtaStat) popoutTotalEtaStat.innerText = totalEtaFormatted;
+
+  const popoutQueueStat = document.getElementById('popoutQueueStat');
+  if (popoutQueueStat) {
+    const completedCount = allKnownTasks.filter(t => t.status === 'completed').length;
+    const totalCount = allKnownTasks.length || activeTasks.length;
+    popoutQueueStat.innerText = `${completedCount + (currentTask.status === 'transferring' ? 1 : 0)} / ${totalCount} items`;
+  }
+
+  // 5. Cancel Controls
+  const btnCancelAll = document.getElementById('btnPopoutCancelAll');
+  const countCancelAll = document.getElementById('popoutCancelAllCount');
+  if (btnCancelAll) {
+    if (activeTasks.length > 1) {
+      btnCancelAll.style.display = 'inline-flex';
+      if (countCancelAll) countCancelAll.innerText = activeTasks.length;
+    } else {
+      btnCancelAll.style.display = 'none';
+    }
+  }
+
+  const btnCancel = document.getElementById('btnPopoutCancel');
+  if (btnCancel) {
+    if (currentTask.status === 'cancelling') {
+      btnCancel.disabled = true;
+      btnCancel.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Cancelling…';
+    } else {
+      btnCancel.disabled = false;
+      btnCancel.innerHTML = '<i class="fa-solid fa-xmark"></i> Cancel Transfer';
+    }
+  }
+}
+
+function handleNetworkStatusChange(isOnline) {
+  const alertEl = document.getElementById('popoutNetworkAlert');
+  const titleEl = document.getElementById('popoutNetworkTitle');
+  const descEl = document.getElementById('popoutNetworkDesc');
+  const resumeBtn = document.getElementById('btnPopoutResume');
+  const alertIcon = document.getElementById('popoutNetworkAlertIcon');
+
+  const hasTransfers = (activeTransfersCache || []).some(
+    t => ['transferring', 'queued', 'cancelling', 'failed'].includes(t.status)
+  );
+
+  if (!isOnline) {
+    if (alertEl && hasTransfers) {
+      alertEl.style.display = 'flex';
+      alertEl.classList.remove('restored');
+      if (titleEl) titleEl.innerText = 'Network Disconnected!';
+      if (descEl) descEl.innerText = 'Internet / Network connection was lost during file transfer. Transfers paused. Waiting for connection to restore...';
+      if (alertIcon) alertIcon.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i>';
+      if (resumeBtn) {
+        resumeBtn.disabled = true;
+        resumeBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Waiting for Network…';
+      }
+    }
+    showToast('error', 'Network disconnected. File transfers paused until network is restored.', {
+      title: '⚠️ Network Offline',
+      duration: 5000,
+    });
+  } else {
+    if (alertEl && hasTransfers) {
+      alertEl.style.display = 'flex';
+      alertEl.classList.add('restored');
+      if (titleEl) titleEl.innerText = 'Network Connection Restored!';
+      if (descEl) descEl.innerText = 'Network is back online. Click "Continue Transfer" below to resume unfinished transfers.';
+      if (alertIcon) alertIcon.innerHTML = '<i class="fa-solid fa-circle-check"></i>';
+      if (resumeBtn) {
+        resumeBtn.disabled = false;
+        resumeBtn.innerHTML = '<i class="fa-solid fa-play"></i> Continue Transfer';
+      }
+    }
+    showToast('success', 'Network connection restored. Ready to continue file transfers.', {
+      title: '🟢 Network Online',
+      duration: 4000,
+    });
+  }
+}
+
+function showTransferNetworkDisconnectionAlert(message) {
+  const alertEl = document.getElementById('popoutNetworkAlert');
+  const titleEl = document.getElementById('popoutNetworkTitle');
+  const descEl = document.getElementById('popoutNetworkDesc');
+  const resumeBtn = document.getElementById('btnPopoutResume');
+  const alertIcon = document.getElementById('popoutNetworkAlertIcon');
+
+  if (alertEl) {
+    alertEl.style.display = 'flex';
+    alertEl.classList.remove('restored');
+    if (titleEl) titleEl.innerText = 'Transfer Connection Lost!';
+    if (descEl) descEl.innerText = message || 'Connection to remote server was interrupted during transfer. Re-establish connection and click "Continue Transfer".';
+    if (alertIcon) alertIcon.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i>';
+    if (resumeBtn) {
+      resumeBtn.disabled = false;
+      resumeBtn.innerHTML = '<i class="fa-solid fa-play"></i> Continue Transfer';
+    }
+  }
+}
+
+function hideTransferNetworkDisconnectionAlert() {
+  const alertEl = document.getElementById('popoutNetworkAlert');
+  if (alertEl) alertEl.style.display = 'none';
+}
+
+async function continueTransfers() {
+  const resumeBtn = document.getElementById('btnPopoutResume');
+  if (resumeBtn) {
+    resumeBtn.disabled = true;
+    resumeBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Resuming Transfers…';
+  }
+
+  try {
+    // 1. Check if SFTP/SSH is connected; if not, try reconnecting
+    try {
+      const statusRes = await fetch('/api/status');
+      const statusData = await statusRes.json();
+      if (statusData.status !== 'connected') {
+        const host = document.getElementById('sshHost')?.value?.trim();
+        const port = parseInt(document.getElementById('sshPort')?.value, 10) || 22;
+        const username = document.getElementById('sshUser')?.value?.trim();
+        const password = document.getElementById('sshPassword')?.value || '';
+        const privateKeyPath = document.getElementById('sshKeyPath')?.value?.trim() || '';
+        const hostFingerprint = document.getElementById('sshFingerprint')?.value?.trim() || '';
+
+        if (host && username) {
+          showToast('info', `Re-establishing SSH connection to ${username}@${host}...`);
+          await fetch('/api/connect', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ host, port, username, password, privateKeyPath, hostFingerprint }),
+          });
+        }
+      }
+    } catch (_) {}
+
+    // 2. Request backend to retry all interrupted/failed transfers
+    const res = await fetch('/api/retry-failed-transfers', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    const result = await res.json();
+    if (result.success) {
+      if (result.retriedCount > 0) {
+        showToast('success', `Resumed ${result.retriedCount} file transfer(s).`, {
+          title: '▶ Transfers Resumed',
+          duration: 4000,
+        });
+        hideTransferNetworkDisconnectionAlert();
+      } else {
+        const activeTasks = (activeTransfersCache || []).filter(t => ['transferring', 'queued'].includes(t.status));
+        if (activeTasks.length > 0) {
+          showToast('info', `File transfers are actively in progress (${activeTasks.length} queued).`);
+          hideTransferNetworkDisconnectionAlert();
+        } else {
+          showToast('info', 'No pending or interrupted transfers to resume.');
+          hideTransferNetworkDisconnectionAlert();
+        }
+      }
+      fetchTransfers();
+    } else {
+      showToast('error', `Failed to continue transfers: ${result.error || 'Unknown error'}`);
+    }
+  } catch (err) {
+    showToast('error', `Error continuing transfer: ${err.message}`);
+  } finally {
+    if (resumeBtn) {
+      resumeBtn.disabled = false;
+      resumeBtn.innerHTML = '<i class="fa-solid fa-play"></i> Continue Transfer';
+    }
+  }
+}
+
+
+async function cancelCurrentActiveTransfer() {
+  if (!currentActiveTaskId) {
+    const task = (activeTransfersCache || []).find(t => t.status === 'transferring' || t.status === 'queued');
+    if (task) currentActiveTaskId = task.id;
+  }
+  if (!currentActiveTaskId) {
+    showToast('info', 'No active transfer to cancel.');
+    return;
+  }
+  const btn = document.getElementById('btnPopoutCancel');
+  const hudBtn = document.getElementById('btnHudCancel');
+  if (btn) btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Cancelling…';
+  if (hudBtn) hudBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Cancelling…';
+
+  await cancelTransfer(currentActiveTaskId);
+
+  if (btn) btn.innerHTML = '<i class="fa-solid fa-xmark"></i> Cancel Transfer';
+  if (hudBtn) hudBtn.innerHTML = '<i class="fa-solid fa-xmark"></i> Cancel';
+}
+
+async function cancelAllTransfers() {
+  if (!confirm('Are you sure you want to cancel all queued and active file transfers?')) return;
+  try {
+    const res = await fetch('/api/cancel-all-transfers', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    if (res.ok) {
+      showToast('info', 'All file transfers have been cancelled.');
+    } else {
+      for (const t of (activeTransfersCache || [])) {
+        if (t.status === 'transferring' || t.status === 'queued') {
+          await cancelTransfer(t.id);
+        }
+      }
+    }
+    fetchTransfers();
+  } catch (err) {
+    showToast('error', `Error cancelling transfers: ${err.message}`);
+  }
 }
 
 async function cancelTransfer(taskId) {
@@ -4076,6 +4509,20 @@ function formatBytes(bytes) {
   const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
+
+function formatDuration(seconds) {
+  if (!seconds || seconds <= 0 || !isFinite(seconds)) return '--:--';
+  const hrs = Math.floor(seconds / 3600);
+  const mins = Math.floor((seconds % 3600) / 60);
+  const secs = Math.floor(seconds % 60);
+  if (hrs > 0) {
+    return `${hrs}h ${mins}m ${secs}s`;
+  }
+  if (mins > 0) {
+    return `${mins}m ${secs < 10 ? '0' : ''}${secs}s`;
+  }
+  return `${secs}s`;
 }
 
 function escapeHtml(str) {

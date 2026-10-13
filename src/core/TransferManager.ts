@@ -138,6 +138,20 @@ export class TransferTaskState implements TransferProgress {
     this.endTime = Date.now();
   }
 
+  public resetForRetry(): void {
+    this.status = 'queued';
+    this.retries = 0;
+    this.error = undefined;
+    this.transferredBytes = 0;
+    this.transferredFormatted = '0 B';
+    this.percentage = 0;
+    this.speedBytesPerSec = 0;
+    this.speedFormatted = '0 B/s';
+    this.etaSeconds = 0;
+    this.etaFormatted = '--:--';
+    this.endTime = undefined;
+  }
+
   public static formatBytes(bytes: number): string {
     if (!bytes || bytes === 0) return '0 B';
     const k = 1024;
@@ -314,6 +328,40 @@ export class TransferManager extends EventEmitter {
     }
   }
 
+  public retryTask(id: string): boolean {
+    const active = this.activeTasks.get(id);
+    if (active && (active.status === 'failed' || active.status === 'cancelled')) {
+      active.resetForRetry();
+      this.activeTasks.delete(id);
+      this.queue.push(active);
+      this.emit('progress', active);
+      this.processQueue();
+      return true;
+    }
+
+    const idx = this.completedTasks.findIndex((t) => t.id === id);
+    if (idx !== -1) {
+      const task = this.completedTasks.splice(idx, 1)[0];
+      task.resetForRetry();
+      this.queue.push(task);
+      this.emit('progress', task);
+      this.processQueue();
+      return true;
+    }
+    return false;
+  }
+
+  public retryFailed(): number {
+    const failedTasks = this.completedTasks.filter((t) => t.status === 'failed' || t.status === 'cancelled');
+    let count = 0;
+    for (const task of failedTasks) {
+      if (this.retryTask(task.id)) {
+        count++;
+      }
+    }
+    return count;
+  }
+
   public async waitForIdle(timeoutMs: number = 5000): Promise<void> {
     if (this.activeTasks.size === 0 && this.queue.length === 0) return;
 
@@ -402,6 +450,9 @@ export class TransferManager extends EventEmitter {
     } catch (err: any) {
       if (controller.signal.aborted || err?.name === 'AbortError') {
         task.markCancelled();
+        if (!this.completedTasks.some((item) => item.id === task.id)) {
+          this.completedTasks.unshift(task);
+        }
         this.emit('task-cancelled', task);
         this.emit('progress', task);
       } else if (task.retries < task.maxRetries) {
@@ -411,6 +462,9 @@ export class TransferManager extends EventEmitter {
         this.emit('progress', task);
       } else {
         task.markFailed(err?.message || String(err));
+        if (!this.completedTasks.some((item) => item.id === task.id)) {
+          this.completedTasks.unshift(task);
+        }
         this.emit('task-failed', task);
         this.emit('progress', task);
       }

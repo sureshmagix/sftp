@@ -137,7 +137,40 @@ export class LocalFsService {
 
   public async deleteFile(targetPath: string): Promise<void> {
     const cleanPath = this.normalizePath(targetPath);
-    await fs.promises.unlink(cleanPath);
+    try {
+      const stats = await fs.promises.stat(cleanPath);
+      if (stats.isDirectory()) {
+        await this.rmdir(cleanPath, true);
+        return;
+      }
+    } catch (_) {}
+    try {
+      await fs.promises.unlink(cleanPath);
+    } catch (err: any) {
+      if (err.code === 'EISDIR' || err.code === 'EPERM') {
+        await this.rmdir(cleanPath, true);
+      } else {
+        throw err;
+      }
+    }
+  }
+
+  public async deleteItem(targetPath: string): Promise<void> {
+    const cleanPath = this.normalizePath(targetPath);
+    try {
+      const stats = await fs.promises.stat(cleanPath);
+      if (stats.isDirectory()) {
+        await this.rmdir(cleanPath, true);
+      } else {
+        await fs.promises.unlink(cleanPath);
+      }
+    } catch (err: any) {
+      if (err.code === 'EISDIR' || err.code === 'EPERM') {
+        await this.rmdir(cleanPath, true);
+      } else {
+        throw err;
+      }
+    }
   }
 
   public async rmdir(targetPath: string, recursive: boolean = true): Promise<void> {
@@ -145,3 +178,4 @@ export class LocalFsService {
     await fs.promises.rm(cleanPath, { recursive, force: true });
   }
 }
+
